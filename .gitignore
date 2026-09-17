@@ -1,0 +1,22 @@
+# 编译产物
+build/
+*.exe
+*.dll
+*.o
+*.obj
+*.a
+*.lib
+
+# CMake 产物
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# IDE 个人配置（包含本地绝对路径，不应提交）
+.vscode/
+.vs/
+
+# 系统文件
+Thumbs.db
+.DS_Store
