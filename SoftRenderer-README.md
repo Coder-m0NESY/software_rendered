@@ -93,12 +93,14 @@ make -j
 
 | 步骤 | 干什么 | 在哪个文件 |
 | :---: | --- | --- |
-| 1 | **顶点变换** —— 用 MVP 矩阵把顶点搬进裁剪空间 | `src/render/Renderer.cpp` |
-| 2 | **裁剪** —— 丢掉落在相机背后的三角形 | `src/render/Clipper.cpp` |
-| 3 | **视口变换** —— 除以 w，再换算成屏幕上的像素坐标 | `src/render/Renderer.cpp` |
-| 4 | **光栅化** —— 判断哪些像素被三角形盖住，把数据插值出来 | `src/render/Rasterizer.cpp` |
-| 5 | **深度测试 + 上色** —— 谁在前面画谁；采样纹理；算光照 | `src/render/Rasterizer.cpp`、`Lighting.cpp` |
-| 6 | **显示** —— 把缓冲区贴上屏幕 | `src/core/Window.cpp` |
+| 1 | **剔除与排序** —— 丢掉视野外的模型；透明物体从远到近排 | `src/scene/scene.cpp` |
+| 2 | **顶点变换** —— 用 MVP 矩阵把顶点搬进裁剪空间 | `src/render/renderer.cpp` |
+| 3 | **裁剪** —— 丢掉落在相机背后的三角形 | `src/render/clipper.cpp` |
+| 4 | **视口变换** —— 除以 w，再换算成屏幕上的像素坐标 | `src/render/renderer.cpp` |
+| 5 | **光栅化** —— 背面剔除；判断哪些像素被盖住；把数据插值出来 | `src/render/rasterizer.cpp` |
+| 6 | **深度测试 + 上色** —— 谁在前面画谁；采样纹理；算光照 | `src/render/rasterizer.cpp`、`src/render/lighting.cpp` |
+| 7 | **混合** —— Alpha 测试丢弃镂空片元；半透明跟已有颜色混合 | `src/render/blend.cpp` |
+| 8 | **显示** —— 把缓冲区贴上屏幕 | `src/core/window.cpp` |
 
 > **写法说明** ── 这一节是给「想看懂你怎么做的人」看的。它证明你不是把一堆文件堆在一起，
 > 而是清楚每一帧里每一步发生在哪。
@@ -106,35 +108,123 @@ make -j
 
 ## 代码是怎么组织的
 
-| 模块 | 负责什么 | 它**不知道**什么 |
-| --- | --- | --- |
-| `Window` | 窗口、事件循环、把画面贴到屏幕 | 三角形是什么 |
-| `PixelBuffer` | 一块颜色数组 + 一块深度数组 | 矩阵、相机 |
-| `Vec3` / `Mat4` | 向量和矩阵运算 | 屏幕、像素 |
-| `Camera` | 位置、朝向、投影参数 | 像素 |
-| `Mesh` | 顶点、索引、UV | 屏幕 |
-| `Renderer` | 把一个模型画进缓冲区 | SDL |
-| `Scene` | 一堆模型 + 一个相机 + 一个光源 | 光栅化的细节 |
+一个模块只做一件事，并且**尽量不去知道它不该知道的东西**。
 
-```
-SoftRenderer/
-├── src/
-│   ├── core/       Window、PixelBuffer、Color
-│   ├── math/       Vec3、Mat4
-│   ├── scene/      Camera、Mesh、Light
-│   ├── render/     Renderer、Rasterizer、Clipper、Lighting
-│   └── main.cpp
-├── assets/         模型文件放这儿
-├── docs/           截图以后放这儿
-├── CMakeLists.txt
-├── build.bat
-└── README.md
-```
+| 模块 | 文件 | 负责什么 | 它**不知道**什么 |
+| --- | --- | --- | --- |
+| `Color` | `core/color.*` | 一个 ARGB 颜色值，格式跟 SDL 无关 | 像素在画布的哪个位置 |
+| `PixelBuffer` | `core/pixelbuffer.*` | 颜色缓冲 + 深度缓冲 | 矩阵、相机 |
+| `Texture` | `core/texture.*` | 一张图 + 采样（最近邻 / 双线性），以及代码生成的棋盘格 | 它被贴到哪个三角形上 |
+| `Text` | `core/text.*` | 8×8 点阵字，把字符串画进缓冲 | 那些数字算的到底是什么 |
+| `Window` | `core/window.*` | 窗口、事件循环、把画面贴到屏幕 | 三角形是什么 |
+| `Vec2 / 3 / 4` | `math/vec.hpp` / `.cpp` | 向量运算、点积、叉积、归一化、`lerp` | 屏幕、像素 |
+| `Mat33 / Mat44` | `math/mat.hpp` / `.cpp` | 矩阵运算，以及 `perspective` / `lookAt` / `translate` / `rotate` 这些工厂 | 屏幕、像素 |
+| `Vertex` | `scene/vertex.hpp` | 一个顶点都带哪些数据：位置 + 法线 + UV | 自己属于哪个模型 |
+| `Mesh` | `scene/mesh.*` | 顶点数组 + 索引数组 | 屏幕 |
+| `AABB` | `scene/aabb.*` | 轴对齐包围盒 | 相机在哪 |
+| `Frustum` | `scene/frustum.*` | 视锥的六个平面，以及跟 AABB 的相交测试 | 三角形怎么画出来 |
+| `Camera` | `scene/camera.*` | 位置、朝向、投影参数；算出 V 和 P 两个矩阵 | 像素 |
+| `Light` | `scene/light.*` | 光源位置与颜色 | 光栅化发生在哪一行像素 |
+| `Scene` | `scene/scene.*` | 模型列表 + 一个相机 + 一个光源；在这里做剔除和排序 | 光栅化的细节 |
+| `MeshLoader` | `io/objloader.*` | 读 `.obj` 文件，产出一个 `Mesh` | 像素、矩阵、SDL |
+| `Renderer` | `render/renderer.*` | 串联整条管线：M → V → P → 裁剪 → 视口 → 光栅化 | SDL |
+| `Clipper` | `render/clipper.*` | 近平面 / 视锥裁剪 | 纹理、光照 |
+| `Rasterizer` | `render/rasterizer.*` | 边函数光栅化 + 背面剔除 + 深度测试 + 属性插值 | 矩阵、相机、纹理从哪来 |
+| `Lighting` | `render/lighting.*` | 按法线和光源算明暗 | 这个像素是哪个三角形画的 |
+| `Blend` | `render/blend.*` | Alpha 测试 + 颜色混合 | 深度测试（那一步在 `Rasterizer` 里） |
 
 > **写法说明** ── 注意最后一列「它**不知道**什么」，这一列比前两列重要得多。
 >
 > 说「Renderer 负责渲染」谁都会说；说「Renderer 不知道 SDL 的存在」才说明你真的想过模块边界。
 > 面试官最爱追问的就是这里 —— **「如果让你加个多光源，你要改几个文件？」**
+>
+> 「文件」那一列同理：光有模块名没用，**面试官问的是「改哪个文件」**。
+>
+> ⚠️ 表里的命名跟代码对齐过：实际是 `Vec2/3/4` 和 `Mat33/44`，不是笼统的 `Vec3 / Mat4`。
+> 文档和代码名字对不上的话，别人按文档去找文件会找不到。
+
+依赖方向只有一种，箭头表示「可以 include 右边」：
+
+```
+                    ┌──► io/objloader ──┐
+main ───────────────┤                   ▼
+                    └──────────►  scene  ──►  render  ──►  core
+                                                        │
+                                                        └──►  math
+```
+
+`math` 和 `core` 是最底层：谁都可以用它们，它们谁也不依赖（`Color` 连 SDL 都不碰）。
+`Window` 稍微特殊——它是**唯一**认识 SDL 的模块，但被 `main` 直接持有，不进上面这条链。
+
+### 最终目标的目录结构
+
+```
+SoftRenderer/
+├── src/
+│   ├── core/                          底层设施：不认识「渲染管线」这件事
+│   │   ├── color.hpp / .cpp
+│   │   ├── pixelbuffer.hpp / .cpp     颜色缓冲 + 深度缓冲（含深度测试）
+│   │   ├── texture.hpp / .cpp         纹理数据 + 采样 + 棋盘格生成
+│   │   ├── text.hpp / .cpp            8×8 点阵字，画左上角 HUD
+│   │   └── window.hpp / .cpp
+│   ├── math/
+│   │   ├── vec.hpp / .cpp             Vec2 / Vec3 / Vec4
+│   │   └── mat.hpp / .cpp             Mat33 / Mat44 + 各种变换工厂
+│   ├── scene/                         有什么东西
+│   │   ├── vertex.hpp                 位置 + 法线 + UV
+│   │   ├── mesh.hpp / .cpp            顶点数组 + 索引数组
+│   │   ├── aabb.hpp / .cpp            包围盒
+│   │   ├── frustum.hpp / .cpp         视锥六平面 + 相交测试
+│   │   ├── camera.hpp / .cpp          算出 V 和 P
+│   │   ├── light.hpp / .cpp           光源位置与颜色
+│   │   └── scene.hpp / .cpp           模型 + 相机 + 光源；剔除与排序
+│   ├── render/                        怎么画出来
+│   │   ├── renderer.hpp / .cpp        串联整条管线
+│   │   ├── clipper.hpp / .cpp         近平面 / 视锥裁剪
+│   │   ├── rasterizer.hpp / .cpp      边函数光栅化 + 背面剔除 + 深度测试
+│   │   ├── lighting.hpp / .cpp        Lambert 光照
+│   │   └── blend.hpp / .cpp           Alpha 测试 + 颜色混合
+│   ├── io/
+│   │   └── objloader.hpp / .cpp       全项目唯一的文件 I/O
+│   └── main.cpp                       占位入口
+├── assets/                            模型文件放这儿
+├── docs/                              文档 + 截图
+│   └── tutorial/                      教程（学习路线 + 专题推导）
+├── CMakeLists.txt
+├── build.bat
+├── README.md
+└── SoftRenderer-README.md
+```
+
+> **写法说明** ── 这里放的是**最终目标**，不是现状。现状和进度看 `docs/tutorial/渲染管线学习路线.md`。
+> README 的架构一节应该描述「设计成什么样」，进度是另一回事——两者混在一张表里，过两周就没人维护得动。
+>
+> 如果想看「**为什么这么分层**、每个文件跟谁有联系、出了问题该查哪个文件」，
+> 见 `docs/tutorial/渲染管线学习路线.md` 的第六节「目录讲解」。README 这节只列结论，不展开讲道理。
+>
+> `docs/tutorial/` 里放的是**教程类**文件，和 README 的分工是：
+>
+> | 文件 | 定位 | 什么时候看 |
+> | --- | --- | --- |
+> | `渲染管线学习路线.md` | 进度 + 执行计划 | 每次开工前，看「我现在走到哪一步」 |
+> | `lookAt-视图矩阵推导.html` | 单点专题推导 | 写 `Camera` 之前，把视图矩阵搞懂 |
+
+### 相比最初的规划，补进来的部分
+
+一开始只列了 `core / math / scene / render` 四个目录，下面这些是后来对着渲染管线图逐个补齐的：
+
+| 补进来的 | 原来漏在哪 |
+| --- | --- |
+| `scene/vertex.hpp` | 原规划只说「Mesh 有顶点」，没说顶点**带哪些数据**（UV、法线） |
+| `core/texture.*` | 第 7 步「纹理」有步骤，没模块 |
+| `scene/aabb.*`、`scene/frustum.*` | 管线图上「视锥体剔除」是整整一个阶段，原规划完全没有 |
+| `render/blend.*` | 管线图上「Alpha 测试 + 颜色混合」在输出合并里，原规划没有 |
+| `io/objloader.*` | 第 9 步「.obj 换掉手写立方体」有步骤，没给模块。顺带新增了一个顶层目录 `io/`——全项目只有它碰文件系统 |
+| `core/text.*` | README 承诺了「左上角显示帧率和三角形数量」，但没人负责画字 |
+| `PixelBuffer` 加深度缓冲 | 模块表早就写了「颜色 + 深度」，实际代码里只有颜色 |
+
+另外两处职责变大了：`Clipper` 从「只裁近平面」扩到完整视锥裁剪，`Rasterizer` 从「只填三角形」扩到「背面剔除 + 深度测试 + 属性插值」。
+这两件事都不是新模块，但都是原规划里没写清的。
 
 ## 这几个问题，等你做到的时候回来答
 
