@@ -158,42 +158,44 @@ main ───────────────┤                   ▼
 
 ### 最终目标的目录结构
 
+每个文件名后面跟两样东西：**第一个是它的中文意思**（看不懂英文名的时候看这个），第二个是它干什么。
+
 ```
-SoftRenderer/
-├── src/
-│   ├── core/                          底层设施：不认识「渲染管线」这件事
-│   │   ├── color.hpp / .cpp
-│   │   ├── pixelbuffer.hpp / .cpp     颜色缓冲 + 深度缓冲（含深度测试）
-│   │   ├── texture.hpp / .cpp         纹理数据 + 采样 + 棋盘格生成
-│   │   ├── text.hpp / .cpp            8×8 点阵字，画左上角 HUD
-│   │   └── window.hpp / .cpp
-│   ├── math/
-│   │   ├── vec.hpp / .cpp             Vec2 / Vec3 / Vec4
-│   │   └── mat.hpp / .cpp             Mat33 / Mat44 + 各种变换工厂
-│   ├── scene/                         有什么东西
-│   │   ├── vertex.hpp                 位置 + 法线 + UV
-│   │   ├── mesh.hpp / .cpp            顶点数组 + 索引数组
-│   │   ├── aabb.hpp / .cpp            包围盒
-│   │   ├── frustum.hpp / .cpp         视锥六平面 + 相交测试
-│   │   ├── camera.hpp / .cpp          算出 V 和 P
-│   │   ├── light.hpp / .cpp           光源位置与颜色
-│   │   └── scene.hpp / .cpp           模型 + 相机 + 光源；剔除与排序
-│   ├── render/                        怎么画出来
-│   │   ├── renderer.hpp / .cpp        串联整条管线
-│   │   ├── clipper.hpp / .cpp         近平面 / 视锥裁剪
-│   │   ├── rasterizer.hpp / .cpp      边函数光栅化 + 背面剔除 + 深度测试
-│   │   ├── lighting.hpp / .cpp        Lambert 光照
-│   │   └── blend.hpp / .cpp           Alpha 测试 + 颜色混合
-│   ├── io/
-│   │   └── objloader.hpp / .cpp       全项目唯一的文件 I/O
-│   └── main.cpp                       占位入口
-├── assets/                            模型文件放这儿
-├── docs/                              文档 + 截图
-│   └── tutorial/                      教程（学习路线 + 专题推导）
-├── CMakeLists.txt
-├── build.bat
-├── README.md
-└── SoftRenderer-README.md
+SoftRenderer/                          项目根目录
+├── src/                               源代码
+│   ├── core/                          核心设施：不认识「渲染管线」这件事
+│   │   ├── color.hpp / .cpp           颜色：一个 ARGB 颜色值，跟 SDL 无关
+│   │   ├── pixelbuffer.hpp / .cpp     像素缓冲：颜色缓冲 + 深度缓冲（含深度测试）
+│   │   ├── texture.hpp / .cpp         纹理：纹理数据 + 采样 + 棋盘格生成
+│   │   ├── text.hpp / .cpp            点阵字：8×8 点阵，画左上角 HUD
+│   │   └── window.hpp / .cpp          窗口：开窗、事件循环、把画面贴到屏幕
+│   ├── math/                          数学工具
+│   │   ├── vec.hpp / .cpp             向量：Vec2 / Vec3 / Vec4
+│   │   └── mat.hpp / .cpp             矩阵：Mat33 / Mat44 + 各种变换工厂
+│   ├── scene/                         场景数据：有什么东西
+│   │   ├── vertex.hpp                 顶点：位置 + 法线 + UV
+│   │   ├── mesh.hpp / .cpp            网格：顶点数组 + 索引数组
+│   │   ├── aabb.hpp / .cpp            包围盒：轴对齐包围盒
+│   │   ├── frustum.hpp / .cpp         视锥：六个平面 + 相交测试
+│   │   ├── camera.hpp / .cpp          相机：算出 V 和 P 两个矩阵
+│   │   ├── light.hpp / .cpp           光源：位置与颜色
+│   │   └── scene.hpp / .cpp           场景：模型 + 相机 + 光源；剔除与排序
+│   ├── render/                        渲染：怎么画出来
+│   │   ├── renderer.hpp / .cpp        渲染器：串联整条管线
+│   │   ├── clipper.hpp / .cpp         裁剪器：近平面 / 视锥裁剪
+│   │   ├── rasterizer.hpp / .cpp      光栅化器：边函数光栅化 + 背面剔除 + 深度测试
+│   │   ├── lighting.hpp / .cpp        光照：Lambert 光照
+│   │   └── blend.hpp / .cpp           混合：Alpha 测试 + 颜色混合
+│   ├── io/                            输入输出：全项目唯一碰文件系统的地方
+│   │   └── objloader.hpp / .cpp       模型加载器：读 .obj 文件，产出 Mesh
+│   └── main.cpp                       主入口：组装 + 主循环
+├── assets/                            素材：模型文件放这儿
+├── docs/                              文档：文档 + 截图
+│   └── tutorial/                      教程：学习路线 + 专题推导
+├── CMakeLists.txt                     构建配置：告诉 CMake 编译哪些文件
+├── build.bat                          一键编译脚本
+├── README.md                          项目说明（一页速览）
+└── SoftRenderer-README.md             项目说明（详细版草稿）
 ```
 
 > **写法说明** ── 这里放的是**最终目标**，不是现状。现状和进度看 `docs/tutorial/渲染管线学习路线.md`。

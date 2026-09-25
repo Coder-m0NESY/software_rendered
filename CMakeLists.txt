@@ -38,6 +38,8 @@ add_executable(SoftRenderer
     src/core/pixelbuffer.cpp
     src/math/vec.cpp
     src/math/mat.cpp
+    src/render/rasterizer.cpp
+    src/render/renderer.cpp
 )
 
 # src 也加进搜索路径，这样任何文件里都能写 #include "core/color.hpp"，

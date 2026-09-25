@@ -2,8 +2,11 @@
 
 #include "color.hpp"
 
+#include <algorithm>
+#include <cstddef>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 // ===========================================================================
 //  PixelBuffer 的实现。
@@ -15,6 +18,11 @@ namespace {
 // 画布的像素格式。挑 ARGB8888 是因为它跟 Color::to_pixel() 的 0xAARRGGBB
 // 完全对得上；换成 RGBA8888 的话红蓝会互换，alpha 也会跑到错误的字节上。
 constexpr uint32_t kPixelFormat = SDL_PIXELFORMAT_ARGB8888;
+
+// 深度缓冲的清屏值：最远。
+// 深度存的是 NDC 的 z（范围 [-1,1]，近平面 -1、远平面 +1），越小越近，
+// 所以「什么都没有」必须用一个比任何真实片元都大的值——就是 +1。
+constexpr float kDepthFar = 1.0f;
 
 // surface 一行有多少个 32 位像素。
 // pitch 的单位是字节，必须除以 sizeof(uint32_t) 才能当数组下标用。
@@ -36,6 +44,10 @@ PixelBuffer::PixelBuffer(int width, int height)
         throw std::runtime_error(
             std::string("创建 PixelBuffer 失败: ") + SDL_GetError());
     }
+
+    // 颜色和深度两块缓冲同尺寸、同寿命，所以在这里一起建出来。
+    // 分两处建的话，迟早有一处会忘了跟着改。
+    depth_.assign(static_cast<std::size_t>(width) * height, kDepthFar);
 }
 
 PixelBuffer::PixelBuffer(SDL_Surface* surface)
@@ -44,6 +56,10 @@ PixelBuffer::PixelBuffer(SDL_Surface* surface)
     if (surface_ == nullptr) {
         throw std::runtime_error("传入的 SDL_Surface 不能为 nullptr");
     }
+
+    // 尺寸以传进来的 surface 为准，别去信调用方口头说的宽高
+    depth_.assign(static_cast<std::size_t>(surface_->w) * surface_->h,
+                  kDepthFar);
 }
 
 PixelBuffer::~PixelBuffer()
@@ -57,7 +73,8 @@ PixelBuffer::~PixelBuffer()
 // ============= 移动语义 =============
 
 PixelBuffer::PixelBuffer(PixelBuffer&& other) noexcept
-    : surface_(other.surface_)
+    : surface_(other.surface_),
+      depth_(std::move(other.depth_))
 {
     other.surface_ = nullptr;  // 所有权转移，原对象不再 free 这块内存
 }
@@ -69,6 +86,7 @@ PixelBuffer& PixelBuffer::operator=(PixelBuffer&& other) noexcept
             SDL_FreeSurface(surface_);
         }
         surface_ = other.surface_;
+        depth_ = std::move(other.depth_);
         other.surface_ = nullptr;
     }
     return *this;
@@ -134,6 +152,36 @@ void PixelBuffer::put_pixel(int x, int y, const Color& color)
 Color PixelBuffer::get_pixel_color(int x, int y) const
 {
     return Color::from_pixel(get_pixel(x, y));
+}
+
+// ============= 深度缓冲 =============
+
+void PixelBuffer::clear_depth()
+{
+    // 用 fill 而不是 assign：长度没变，省一次可能的内存重分配
+    std::fill(depth_.begin(), depth_.end(), kDepthFar);
+}
+
+float PixelBuffer::depth_at(int x, int y) const
+{
+    // 越界返回最远值（原因见头文件）。
+    // 注意这里不能返回 0——0 在 NDC 里是「正中间」，比一半的真实片元都近，
+    // 那样越界像素就会通过深度测试，在画布外面画出东西。
+    if (!in_bounds(x, y)) {
+        return kDepthFar;
+    }
+
+    // 深度数组是自己分配的，紧密排列，stride 就是 w（不是 color 那边的 pitch）
+    return depth_[static_cast<std::size_t>(y) * surface_->w + x];
+}
+
+void PixelBuffer::set_depth(int x, int y, float depth)
+{
+    if (!in_bounds(x, y)) {
+        return;  // 越界就直接忽略，跟 put_pixel 一个态度
+    }
+
+    depth_[static_cast<std::size_t>(y) * surface_->w + x] = depth;
 }
 
 // ============= 批量绘图操作 =============
@@ -204,6 +252,10 @@ void PixelBuffer::clear(uint32_t color)
     // SDL_FillRect 会按 surface 自己的格式解释这个像素值。
     // 因为画布格式就是 ARGB8888，所以传 to_pixel() 的结果是对的。
     SDL_FillRect(surface_, nullptr, color);
+
+    // 深度跟着一起清。不清的话，上一帧留下的深度会把这一帧的片元全挡掉，
+    // 屏幕直接一片空白——而且很难看出是深度没清导致的。
+    clear_depth();
 }
 
 void PixelBuffer::clear(const Color& color)
