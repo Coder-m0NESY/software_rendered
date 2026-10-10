@@ -78,7 +78,18 @@ int main(int argc, char* argv[])
 
     // ---- 3. 光源 + 投影（放循环外，一帧一帧复用） ----
     constexpr float kPi = 3.14159265358979f;
-    const Color kBaseColor(255, 255, 255, 255);   // 立方体基础色（白色，亮度由光照决定）
+    // 六个面各一种基色，便于观察：转起来一眼分清哪个面朝前。
+    // 亮度仍然完全由 Lambert 光照决定（每种颜色都会随面朝向变亮变暗）。
+    // 值留了余量不满格，防止光照后乘到 255 溢出被钳制。
+    // 顺序与上面 vertices 里 6 个面的排列一一对应：远、近、底、顶、左、右。
+    const Color kFaceColors[6] = {
+        Color(230,  90,  90, 255),   // 远面（z=-1）：红
+        Color( 90, 200,  90, 255),   // 近面（z=+1）：绿
+        Color( 90, 120, 230, 255),   // 底面（y=-1）：蓝
+        Color(230, 200,  80, 255),   // 顶面（y=+1）：黄
+        Color(200,  90, 200, 255),   // 左面（x=-1）：紫
+        Color( 90, 200, 200, 255),   // 右面（x=+1）：青
+    };
     // 光源位置不再固定在世界空间：每帧挂在相机上重算，见主循环里的光照段
 
     const Mat44 projection = Mat44::perspective(kPi / 3.0f,
@@ -159,18 +170,8 @@ int main(int argc, char* argv[])
             const Vec3 world_pos    = (model * vertices[i].position).xyz();
             const Vec3 world_normal = model.transformDirection(vertices[i].normal);
             const Vec3 light_dir = normalize(light_pos - world_pos);
-            vertex_colors[i] = compute_lambert(world_normal, light_dir, kBaseColor, 0.2f).to_pixel();
-        }
-
-        // 临时诊断：打印 6 个面第一个顶点的灰度，验证面间亮度差。
-        // 预期（默认视角）：近面~117 / 顶面~82 / 右面~156，三个值明显不同。
-        static bool diag_printed = false;
-        if (!diag_printed) {
-            diag_printed = true;
-            for (int f = 0; f < 6; ++f) {
-                std::printf("[diag] face %d  R = %d\n", f,
-                            static_cast<int>((vertex_colors[f * 6] >> 16) & 0xFF));
-            }
+            // 36 顶点每 6 个属于一个面，i/6 就是面编号（0~5）
+            vertex_colors[i] = compute_lambert(world_normal, light_dir, kFaceColors[i / 6], 0.2f).to_pixel();
         }
 
         const Mat44 mvp = projection * view * model;
