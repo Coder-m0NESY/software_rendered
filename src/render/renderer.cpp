@@ -101,3 +101,49 @@ void renderer::draw_filled(PixelBuffer& fb,
                             color);
     }
 }
+
+void renderer::draw_filled_colored(PixelBuffer& fb,
+                                   const Mat44& mvp,
+                                   const Vec3* vertices, const uint32_t* colors,
+                                   int vertex_count,
+                                   const int (*triangles)[3], int triangle_count)
+{
+    // 和 draw_filled 几乎一样，只是多了 colors 数组。
+    // 存每个顶点的颜色引用（不用拷贝，数组里的指针指向 main 的 colors 数组）。
+
+    constexpr int kMaxVertices = 1024;
+    if (vertex_count > kMaxVertices) {
+        vertex_count = kMaxVertices;
+    }
+
+    int screen_x[kMaxVertices];
+    int screen_y[kMaxVertices];
+    float screen_z[kMaxVertices];
+    uint32_t vertex_color[kMaxVertices];
+    bool visible[kMaxVertices];
+
+    for (int i = 0; i < vertex_count; ++i) {
+        const Vec4 clip = mvp * vertices[i];
+        if (clip.w < 1e-6f) {
+            visible[i] = false;
+            continue;
+        }
+        visible[i] = true;
+        const Vec4 ndc = clip.perspectiveDivide();
+        viewport(ndc.x, ndc.y, fb.width(), fb.height(),
+                 screen_x[i], screen_y[i]);
+        screen_z[i] = ndc.z;
+        vertex_color[i] = colors[i];
+    }
+
+    for (int t = 0; t < triangle_count; ++t) {
+        const int a = triangles[t][0];
+        const int b = triangles[t][1];
+        const int c = triangles[t][2];
+        if (!visible[a] || !visible[b] || !visible[c]) continue;
+        draw_triangle_depth(fb,
+                            screen_x[a], screen_y[a], screen_z[a], vertex_color[a],
+                            screen_x[b], screen_y[b], screen_z[b], vertex_color[b],
+                            screen_x[c], screen_y[c], screen_z[c], vertex_color[c]);
+    }
+}

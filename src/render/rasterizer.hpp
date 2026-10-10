@@ -52,6 +52,12 @@ void draw_triangle_depth(PixelBuffer& fb,
                          int x2, int y2, float z2,
                          uint32_t color);
 
+// 带深度测试 + 三个顶点各带一个颜色（平滑着色）
+void draw_triangle_depth(PixelBuffer& fb,
+                         int x0, int y0, float z0, uint32_t c0,
+                         int x1, int y1, float z1, uint32_t c1,
+                         int x2, int y2, float z2, uint32_t c2);
+
 // ---- 通用入口：默认走边函数法 ----
 
 void draw_triangle(PixelBuffer& fb,

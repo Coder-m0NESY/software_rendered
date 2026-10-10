@@ -263,6 +263,51 @@ void draw_triangle_depth(PixelBuffer& fb,
     }
 }
 
+// ---- 带深度测试 + 三颜色（平滑着色）版 ----
+void draw_triangle_depth(PixelBuffer& fb,
+                         int x0, int y0, float z0, uint32_t c0,
+                         int x1, int y1, float z1, uint32_t c1,
+                         int x2, int y2, float z2, uint32_t c2)
+{
+    const int min_x = std::max(0, std::min({x0, x1, x2}));
+    const int min_y = std::max(0, std::min({y0, y1, y2}));
+    const int max_x = std::min(fb.width()  - 1, std::max({x0, x1, x2}));
+    const int max_y = std::min(fb.height() - 1, std::max({y0, y1, y2}));
+
+    const SDL_PixelFormat* fmt = fb.format();
+    RGBf C0, C1, C2;
+    unpack3(c0, c1, c2, fmt, C0, C1, C2);
+
+    for (int y = min_y; y <= max_y; ++y) {
+        for (int x = min_x; x <= max_x; ++x) {
+
+            const int w0 = edge_cross(x0, y0, x1, y1, x, y);
+            const int w1 = edge_cross(x1, y1, x2, y2, x, y);
+            const int w2 = edge_cross(x2, y2, x0, y0, x, y);
+
+            if ((w0 >= 0 && w1 >= 0 && w2 >= 0) ||
+                (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
+
+                const int sum = w0 + w1 + w2;
+                if (sum == 0) continue;
+
+                const float inv = 1.0f / static_cast<float>(sum);
+                const float z = (w1 * z0 + w2 * z1 + w0 * z2) * inv;
+
+                if (z < fb.depth_at(x, y)) {
+                    // 用重心坐标插值颜色
+                    const float a0 = w1 * inv;   // V0 的权重
+                    const float a1 = w2 * inv;   // V1 的权重
+                    const float a2 = w0 * inv;   // V2 的权重
+                    fb.put_pixel(x, y,
+                        pack_rgb(mix_rgb(a0, C0, a1, C1, a2, C2), fmt));
+                    fb.set_depth(x, y, z);
+                }
+            }
+        }
+    }
+}
+
 // ============================================================
 //  通用入口：三种算法里默认用边函数法（最快、最通用）
 // ============================================================

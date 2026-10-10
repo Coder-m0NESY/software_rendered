@@ -40,6 +40,15 @@ void draw_filled(PixelBuffer& fb,
                  const int (*triangles)[3], int triangle_count,
                  uint32_t color);
 
+// 画一个实心模型（平滑着色版）：每个顶点带自己的颜色。
+// colors 数组和 vertices 数组一一对应，长度相同。
+// 三角形内部用重心坐标插值颜色。
+void draw_filled_colored(PixelBuffer& fb,
+                         const Mat44& mvp,
+                         const Vec3* vertices, const uint32_t* colors,
+                         int vertex_count,
+                         const int (*triangles)[3], int triangle_count);
+
 }  // namespace renderer
 
 #endif
