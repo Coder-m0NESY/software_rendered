@@ -63,7 +63,7 @@ void renderer::draw_filled(PixelBuffer& fb,
 {
     // 和 draw_wireframe 一样：先把所有顶点算成屏幕坐标，再按索引表画。
     // 第一个循环（顶点变换）和 draw_wireframe 完全相同，只有第二个循环不同：
-    // 棱表 edges[2] → 三角形表 triangles[3]，draw_line → draw_triangle。
+    // 棱表 edges[2] → 三角形表 triangles[3]，draw_line → draw_triangle_depth。
 
     constexpr int kMaxVertices = 1024;
     if (vertex_count > kMaxVertices) {
@@ -85,7 +85,7 @@ void renderer::draw_filled(PixelBuffer& fb,
         const Vec4 ndc = clip.perspectiveDivide();
         viewport(ndc.x, ndc.y, fb.width(), fb.height(),
                  screen_x[i], screen_y[i]);
-        screen_z[i] = clip.z;   // 存 clip.z，线性可插值
+        screen_z[i] = ndc.z;   // 存 NDC z，范围 [-1,1]，和深度初始值 +1.0 同空间
     }
 
     // 按三角形表，每行三个顶点下标，填一个三角形

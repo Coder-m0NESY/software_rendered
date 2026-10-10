@@ -15,7 +15,7 @@ class PixelBuffer;
 //
 // 目前做两件事：
 //   线框渲染（draw_wireframe）：顶点 → 屏幕坐标 → draw_line
-//   实心渲染（draw_filled）：  顶点 → 屏幕坐标 → draw_triangle
+//   实心渲染（draw_filled）：  顶点 → 屏幕坐标 → draw_triangle_depth（带深度测试）
 namespace renderer {
 
 // NDC [-1,1] → 屏幕像素坐标。
