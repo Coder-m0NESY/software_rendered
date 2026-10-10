@@ -77,7 +77,7 @@ int main(int argc, char* argv[])
 
     // ---- 3. 光源 + 投影（放循环外，一帧一帧复用） ----
     constexpr float kPi = 3.14159265358979f;
-    const Color kBaseColor(200, 200, 200, 255);   // 立方体基础色（灰白色）
+    const Color kBaseColor(255, 255, 255, 255);   // 立方体基础色（白色，亮度由光照决定）
     const Vec3  kLightPos(3.0f, 4.0f, 2.0f);      // 光源在世界空间的位置
 
     const Mat44 projection = Mat44::perspective(kPi / 3.0f,
@@ -92,6 +92,13 @@ int main(int argc, char* argv[])
     // 每帧算好的顶点颜色缓存
     uint32_t vertex_colors[36];
 
+    // 位置数组：Vertex 数组内存里 position 和 normal 交替排列，
+    // 而 renderer 需要一串连续的 Vec3，所以单独拷一份（初始化一次就够）。
+    Vec3 positions[36];
+    for (int i = 0; i < 36; ++i) {
+        positions[i] = vertices[i].position;
+    }
+
     // ---- 4. 主循环 ----
     while (!window.closed()) {
         window.poll_events();
@@ -103,7 +110,7 @@ int main(int argc, char* argv[])
         pitch -= window.mouse_dy() * 0.005f;     // 向下拖 = 相机朝下看，pitch 减小
 
         // 保底自动旋转（鼠标不动时也在转，防止静止看不到效果）
-        yaw += 0.002f;
+        // yaw += 0.002f;  // 已注释：相机不自动转，只让模型自己转
 
         // pitch 夹紧在 [-π/3, π/3]，防止相机翻到地板下面
         pitch = std::clamp(pitch, -kPi / 3.0f, kPi / 3.0f);
@@ -136,7 +143,7 @@ int main(int argc, char* argv[])
 
         // ---- 渲染 ----
         renderer::draw_filled_colored(buffer, mvp,
-                                      &vertices[0].position, vertex_colors,
+                                      positions, vertex_colors,
                                       36, triangles, 12);
 
         window.present(static_cast<const std::uint32_t*>(
