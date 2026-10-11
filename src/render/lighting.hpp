@@ -18,4 +18,13 @@ Color compute_lambert(const Vec3& normal,
                       const Color& base,
                       float ambient = 0.3f);
 
+// 只要亮度（0~1），不要颜色。
+//
+// 贴图模式下用这个：基色由贴图提供，光照只负责「压暗」，
+//   最终颜色 = 贴图像素 × 这个亮度
+// 所以不需要先乘一个白色再除回来，直接拿亮度最省事。
+float lambert_intensity(const Vec3& normal,
+                        const Vec3& light_dir,
+                        float ambient = 0.3f);
+
 #endif

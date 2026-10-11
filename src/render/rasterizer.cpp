@@ -2,6 +2,7 @@
 
 #include "core/color.hpp"
 #include "core/pixelbuffer.hpp"
+#include "core/texture.hpp"
 
 #include <cstdlib>   // std::abs
 #include <algorithm>  // std::min, std::max
@@ -131,6 +132,17 @@ uint32_t pack_rgb(const RGBf& c, const SDL_PixelFormat* fmt)
         static_cast<Uint8>(c.g),
         static_cast<Uint8>(c.b),
         255);
+}
+
+// 贴图颜色 × 光照亮度 = 最终颜色。
+// 白色 255 × 亮度 0.5 = 128，等价于「这张贴图被照暗了一半」。
+Color modulate(const Color& c, float light)
+{
+    auto f = [light](uint8_t v) -> uint8_t {
+        const float r = static_cast<float>(v) * light;
+        return static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, r)));
+    };
+    return Color(f(c.r), f(c.g), f(c.b), 255);
 }
 
 }  // namespace
@@ -338,4 +350,95 @@ void draw_triangle(PixelBuffer& fb,
                    const Color& c0, const Color& c1, const Color& c2)
 {
     draw_triangle_edge(fb, x0, y0, x1, y1, x2, y2, c0, c1, c2);
+}
+
+// ============================================================
+//  带纹理 + 透视校正的三角形填充
+// ============================================================
+
+// 透视校正到底在修什么？
+//
+// 屏幕上一条等长的线段，映射回三维空间里**并不等长**：离相机近的那段
+// 在屏幕上只占一小截，实际却很长。所以像 UV 这种「贴在三维表面上的属性」，
+// 拿屏幕空间的重心坐标直接线性插值，算出来的位置是错的 ——
+// 表现就是在斜着看的面上，贴图被「往远处拉」，格子被拉成弧形。
+//
+// 数学上能证明：**1/w 在屏幕空间是线性的**，而 u/w 也是。
+// 所以正确做法是：
+//     ① 在屏幕空间线性插值 u/w、v/w、1/w 这三个量（这一步合法）
+//     ② 再除回来：u = interp(u/w) / interp(1/w)
+// 这就是「透视校正插值」。多出来的代价只是每像素两次乘加和一次除法。
+void draw_triangle_textured(PixelBuffer& fb,
+                            const ScreenVertex& v0,
+                            const ScreenVertex& v1,
+                            const ScreenVertex& v2,
+                            const Texture& texture,
+                            bool perspective_correct,
+                            bool bilinear)
+{
+    // ---- 包围盒（顺带裁剪到画布内）----
+    const int min_x = std::max(0, std::min({v0.x, v1.x, v2.x}));
+    const int min_y = std::max(0, std::min({v0.y, v1.y, v2.y}));
+    const int max_x = std::min(fb.width()  - 1, std::max({v0.x, v1.x, v2.x}));
+    const int max_y = std::min(fb.height() - 1, std::max({v0.y, v1.y, v2.y}));
+
+    for (int y = min_y; y <= max_y; ++y) {
+        for (int x = min_x; x <= max_x; ++x) {
+
+            const int w0 = edge_cross(v0.x, v0.y, v1.x, v1.y, x, y);  // 边 V0→V1
+            const int w1 = edge_cross(v1.x, v1.y, v2.x, v2.y, x, y);  // 边 V1→V2
+            const int w2 = edge_cross(v2.x, v2.y, v0.x, v0.y, x, y);  // 边 V2→V0
+
+            if (!((w0 >= 0 && w1 >= 0 && w2 >= 0) ||
+                  (w0 <= 0 && w1 <= 0 && w2 <= 0))) {
+                continue;
+            }
+
+            const int sum = w0 + w1 + w2;
+            if (sum == 0) continue;     // 退化三角形，跳过
+
+            const float inv = 1.0f / static_cast<float>(sum);
+            const float a0 = w1 * inv;  // V0 的权重
+            const float a1 = w2 * inv;  // V1 的权重
+            const float a2 = w0 * inv;  // V2 的权重
+
+            // 深度：NDC 的 z 在屏幕空间本来就是线性的，直接插
+            const float z = a0 * v0.z + a1 * v1.z + a2 * v2.z;
+            if (z >= fb.depth_at(x, y)) continue;   // 更远就不画
+
+            // 亮度：0~1 的标量，跟随 uv 一起校正的影响很小，直接线性插值
+            const float light = a0 * v0.light + a1 * v1.light + a2 * v2.light;
+
+            float u, v;
+            if (perspective_correct) {
+                // 插值 1/w，以及 u/w、v/w —— 这三个在屏幕空间都是线性的
+                const float iw = a0 * v0.invw + a1 * v1.invw + a2 * v2.invw;
+                if (iw > 0.0f) {
+                    const float uw = a0 * v0.u * v0.invw
+                                   + a1 * v1.u * v1.invw
+                                   + a2 * v2.u * v2.invw;
+                    const float vw = a0 * v0.v * v0.invw
+                                   + a1 * v1.v * v1.invw
+                                   + a2 * v2.v * v2.invw;
+                    u = uw / iw;    // 除回来，才是这个像素真正对应的 UV
+                    v = vw / iw;
+                } else {
+                    // 理论上到不了这里：renderer 已经把 w 太小的顶点剔掉了
+                    u = a0 * v0.u + a1 * v1.u + a2 * v2.u;
+                    v = a0 * v0.v + a1 * v1.v + a2 * v2.v;
+                }
+            } else {
+                // 对照实验用的错误做法：把 uv 当普通属性线性插值。
+                // 看似合理，实际上是把「屏幕上的等距」当成了「三维空间里的等距」
+                u = a0 * v0.u + a1 * v1.u + a2 * v2.u;
+                v = a0 * v0.v + a1 * v1.v + a2 * v2.v;
+            }
+
+            const Color texel = bilinear ? texture.sample_bilinear(u, v)
+                                         : texture.sample_nearest(u, v);
+
+            fb.put_pixel(x, y, modulate(texel, light));
+            fb.set_depth(x, y, z);
+        }
+    }
 }

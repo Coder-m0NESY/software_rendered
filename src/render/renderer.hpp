@@ -7,6 +7,7 @@
 #include "math/vec.hpp"
 
 class PixelBuffer;
+class Texture;
 
 // 渲染器：串联整条管线。
 //
@@ -48,6 +49,22 @@ void draw_filled_colored(PixelBuffer& fb,
                          const Vec3* vertices, const uint32_t* colors,
                          int vertex_count,
                          const int (*triangles)[3], int triangle_count);
+
+// 画一个「贴图 + 光照」的实心模型（第 10 步）。
+//   uvs         和 vertices 一一对应，是每个顶点的贴图坐标
+//   intensities 每个顶点的亮度 0~1（Lambert 算出来的），最终色 = 贴图 × 亮度
+//
+// 顶点变换这一半和上面那个完全一样，多出来的是：算完透视除法后，
+// 把 1/w 也一起存下来交给光栅化器——透视校正就靠它。
+void draw_filled_textured(PixelBuffer& fb,
+                          const Mat44& mvp,
+                          const Vec3* vertices, const Vec2* uvs,
+                          const float* intensities,
+                          int vertex_count,
+                          const int (*triangles)[3], int triangle_count,
+                          const Texture& texture,
+                          bool perspective_correct,
+                          bool bilinear);
 
 }  // namespace renderer
 

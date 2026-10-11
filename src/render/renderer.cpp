@@ -1,6 +1,7 @@
 #include "renderer.hpp"
 
 #include "core/pixelbuffer.hpp"
+#include "core/texture.hpp"
 #include "render/rasterizer.hpp"
 
 // ===========================================================================
@@ -145,5 +146,51 @@ void renderer::draw_filled_colored(PixelBuffer& fb,
                             screen_x[a], screen_y[a], screen_z[a], vertex_color[a],
                             screen_x[b], screen_y[b], screen_z[b], vertex_color[b],
                             screen_x[c], screen_y[c], screen_z[c], vertex_color[c]);
+    }
+}
+
+void renderer::draw_filled_textured(PixelBuffer& fb,
+                                    const Mat44& mvp,
+                                    const Vec3* vertices, const Vec2* uvs,
+                                    const float* intensities,
+                                    int vertex_count,
+                                    const int (*triangles)[3], int triangle_count,
+                                    const Texture& texture,
+                                    bool perspective_correct,
+                                    bool bilinear)
+{
+    constexpr int kMaxVertices = 1024;
+    if (vertex_count > kMaxVertices) {
+        vertex_count = kMaxVertices;
+    }
+
+    ScreenVertex sv[kMaxVertices];
+    bool visible[kMaxVertices];
+
+    for (int i = 0; i < vertex_count; ++i) {
+        const Vec4 clip = mvp * vertices[i];
+        if (clip.w < 1e-6f) {
+            // w 太小（顶点贴在相机平面上甚至背后），透视除法会炸，直接丢掉
+            visible[i] = false;
+            continue;
+        }
+        visible[i] = true;
+
+        const Vec4 ndc = clip.perspectiveDivide();
+        viewport(ndc.x, ndc.y, fb.width(), fb.height(), sv[i].x, sv[i].y);
+        sv[i].z     = ndc.z;             // 深度测试用（NDC z，和缓冲初始值同空间）
+        sv[i].invw  = 1.0f / clip.w;     // 透视校正的关键：存 1/w，不存 w
+        sv[i].u     = uvs[i].x;
+        sv[i].v     = uvs[i].y;
+        sv[i].light = intensities[i];
+    }
+
+    for (int t = 0; t < triangle_count; ++t) {
+        const int a = triangles[t][0];
+        const int b = triangles[t][1];
+        const int c = triangles[t][2];
+        if (!visible[a] || !visible[b] || !visible[c]) continue;
+        draw_triangle_textured(fb, sv[a], sv[b], sv[c],
+                               texture, perspective_correct, bilinear);
     }
 }

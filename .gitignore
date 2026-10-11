@@ -56,6 +56,9 @@ compile_commands.json
 .vscode/
 .vs/
 
+# Trae 自动生成的 HTML 分享包（IDE 产物，不是项目源码）
+.trae-html-share-packages/
+
 # Temporary files
 *.tmp
 *.log

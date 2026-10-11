@@ -36,6 +36,8 @@ add_executable(SoftRenderer
     src/core/color.cpp
     src/core/window.cpp
     src/core/pixelbuffer.cpp
+    src/core/texture.cpp
+    src/io/image.cpp
     src/math/vec.cpp
     src/math/mat.cpp
     src/render/rasterizer.cpp
@@ -66,3 +68,11 @@ add_custom_command(TARGET SoftRenderer POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${SDL2_DLL}" "$<TARGET_FILE_DIR:SoftRenderer>"
     COMMENT "Copying SDL2.dll next to the executable")
+
+# assets 也拷到 exe 旁边：程序里读的是相对路径 "assets/texture_brick.bmp"，
+# 从 build/ 目录运行 exe 时，必须能在同级找到 assets/。
+add_custom_command(TARGET SoftRenderer POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+            "$<TARGET_FILE_DIR:SoftRenderer>/assets"
+    COMMENT "Copying assets next to the executable")

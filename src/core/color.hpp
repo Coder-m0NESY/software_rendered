@@ -4,7 +4,8 @@
 #include <cstdint>
 
 // 内部像素格式固定成 0xAARRGGBB，跟 SDL 无关。
-// 整个项目只有 window.cpp 认识 SDL，其它模块（math / render）可以放心 include 这个头。
+// 认识 SDL 的只有 core/window.cpp、io/image.cpp、src/main.cpp，其它模块（math / render）
+// 可以放心 include 这个头。
 class Color {
 public:
     uint8_t r,g,b,a;
