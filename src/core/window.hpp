@@ -49,6 +49,10 @@ public:
     // 本帧刚按下的键（长按的自动重复不算）
     bool key_pressed(SDL_Keycode key) const;
 
+    // 本帧被拖进窗口的文件路径（空字符串 = 这一帧没有拖入）。
+    // 用它实现「把 .obj 拖到窗口上就加载」—— 不用敲命令行，最直观。
+    const std::string& drop_file() const { return drop_file_; }
+
 private:
     // 创建过程失败时统一走这里：报错 + 把自己标记成"已关闭"
     void fail(const std::string& what);
@@ -67,6 +71,7 @@ private:
     float wheel_    = 0.0f;
 
     std::vector<SDL_Keycode> keys_pressed_;
+    std::string              drop_file_;
 };
 
 #endif

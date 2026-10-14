@@ -92,6 +92,28 @@ struct ScreenVertex {
     float light = 1.0f;     // 这个顶点的亮度 0~1（Lambert 算出来的）
 };
 
+// ---- 渲染状态 ----
+//
+// 第 13 步把「一次绘制要用到的一堆开关」打包成一个结构体。
+// 之前是往函数尾巴上一个个加 bool 参数（perspective_correct, bilinear, ...），
+// 每加一个功能就要改一次签名，调用点也跟着改，参数一多还容易传错位置
+// （两个 bool 挨着，谁是谁全靠记）。打包之后：
+//   · 加开关只改结构体，函数签名不动；
+//   · 调用点写 options.xxx = ...，名字自带说明，不会传错；
+//   · 一组状态可以整个复制、整个往下传。
+//
+// 这不是本项目想出来的花活：D3D 的 PSO（Pipeline State Object）、
+// OpenGL 的 glEnable/glBlendFunc 组合、Vulkan 的 VkPipeline，都是同一件事 ——
+// 把「怎么画」和「画什么」分开，前者是状态，后者是数据。
+struct DrawOptions {
+    bool    perspective_correct = true;   // UV 是否做透视校正（第 10 步）
+    bool    bilinear            = false;  // 双线性 or 最近邻采样（第 10 步）
+    bool    alpha_test          = false;  // 是否开 Alpha 测试（第 13 步）
+    uint8_t alpha_threshold     = 128;    // alpha 低于它就丢弃
+    bool    blend               = false;  // 是否开颜色混合（第 13 步）
+    bool    write_depth         = true;   // 是否写深度（半透明物体要关掉）
+};
+
 // 每个顶点带 invw / uv / 亮度，三角形内部插值后采样贴图。
 //
 // 只有 uv 必须做透视校正：
@@ -101,12 +123,13 @@ struct ScreenVertex {
 //
 // perspective_correct = false 时退回「朴素做法」（uv 也当普通属性线性插值），
 // 专门留在代码里做对照实验，让你亲眼看一次扭曲长什么样。
+//
+// 第 13 步起，后面几个开关都收在 DrawOptions 里一起传进来。
 void draw_triangle_textured(PixelBuffer& fb,
                             const ScreenVertex& v0,
                             const ScreenVertex& v1,
                             const ScreenVertex& v2,
                             const Texture& texture,
-                            bool perspective_correct = true,
-                            bool bilinear = false);
+                            const DrawOptions& options = DrawOptions{});
 
 #endif

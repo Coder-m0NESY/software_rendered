@@ -79,10 +79,13 @@ Color Texture::sample_bilinear(float u, float v) const
             std::clamp(top + (bottom - top) * ty + 0.5f, 0.0f, 255.0f));
     };
 
+    // 第 13 步：alpha 也要一起插值。
+    // 否则双线性采样会把半透明贴图拍成不透明（旧版这里写死 255），
+    // 一按 B 切到双线性，玻璃球就变成了实心球 —— 看起来像 bug，其实是丢了 alpha。
     return Color(blend(c00.r, c10.r, c01.r, c11.r),
                  blend(c00.g, c10.g, c01.g, c11.g),
                  blend(c00.b, c10.b, c01.b, c11.b),
-                 255);
+                 blend(c00.a, c10.a, c01.a, c11.a));
 }
 
 Texture Texture::make_checkerboard(int size, int cell,
@@ -97,6 +100,32 @@ Texture Texture::make_checkerboard(int size, int cell,
             // 行号列号之和为奇数 → 涂另一种颜色，交错就出来了
             const bool odd = ((x / cell) + (y / cell)) % 2 != 0;
             t.set_texel(x, y, odd ? b : a);
+        }
+    }
+    return t;
+}
+
+Texture Texture::make_alpha_grid(int size, int cell, int bar,
+                                 const Color& color)
+{
+    // 先整张填成「全透明黑」—— 这就是将来要被 Alpha 测试丢掉的洞。
+    // 注意 alpha 必须显式写 0：Color(r,g,b) 那个三参数构造会把 alpha 补成 255，
+    // 拿它当底就等于整块实心板，洞全被填死了。
+    Texture t(size, size, Color(0, 0, 0, 0));
+    if (cell <= 0) return t;
+
+    // bar 至少 1 像素，否则一条栅栏都画不出来
+    const int w = std::clamp(bar, 1, cell);
+
+    for (int y = 0; y < t.height(); ++y) {
+        for (int x = 0; x < t.width(); ++x) {
+            // 取「在本格里的偏移」：格子边长 cell，x % cell 落在 [0, cell)。
+            // 偏移小于 bar → 这一行/列属于栅栏条，涂成不透明；
+            // 否则留在格子里 —— 那里还是透明，成为洞。
+            const bool on_bar = (x % cell) < w || (y % cell) < w;
+            if (on_bar) {
+                t.set_texel(x, y, color);
+            }
         }
     }
     return t;

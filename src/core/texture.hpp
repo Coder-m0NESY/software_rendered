@@ -42,6 +42,16 @@ public:
     static Texture make_checkerboard(int size, int cell,
                                      const Color& a, const Color& b);
 
+    // ---- 第 13 步：生成一张「镂空」贴图（栅格）----
+    // size：边长；cell：一格的边长；bar：栅栏条的宽度（像素）。
+    // 栅格条是不透明的 color，条与条之间的方格是**全透明**（alpha = 0）。
+    //
+    // 它专门给 Alpha 测试用：alpha = 0 的格子会被整块丢弃，
+    // 于是这块「板子」上真的出现一个个方洞，能看见后面的东西。
+    // cell 要能整除 size，否则图案在贴图接缝处对不上。
+    static Texture make_alpha_grid(int size, int cell, int bar,
+                                   const Color& color);
+
 private:
     // 用 ((v % n) + n) % n 而不是 v % n：后者在 v 为负时结果是负的
     static int wrap_index(int v, int n);

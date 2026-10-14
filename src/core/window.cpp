@@ -45,6 +45,10 @@ Window::Window(const std::string& title, int width, int height)
     }
 
     closed_ = false;
+
+    // 明确打开「文件拖入」事件。SDL 2.0.5 起它本来就是默认开的，
+    // 这里写一行是为了让「支持拖拽」这件事在源码里可见，不靠版本默认值。
+    SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
 }
 
 Window::~Window()
@@ -85,6 +89,7 @@ void Window::poll_events()
     mouse_dy_ = 0.0f;
     wheel_    = 0.0f;
     keys_pressed_.clear();
+    drop_file_.clear();
 
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
@@ -113,6 +118,16 @@ void Window::poll_events()
 
             case SDL_MOUSEWHEEL:
                 wheel_ += static_cast<float>(event.wheel.y);
+                break;
+
+            case SDL_DROPFILE:
+                // 把文件从资源管理器拖进窗口。
+                // event.drop.file 是 SDL 用 malloc 分配的一串 UTF-8 路径，
+                // 谁拿到谁负责释放 —— 必须 SDL_free，否则每次拖拽漏一块内存。
+                if (event.drop.file != nullptr) {
+                    drop_file_ = event.drop.file;
+                    SDL_free(event.drop.file);
+                }
                 break;
 
             default:

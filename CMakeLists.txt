@@ -38,11 +38,13 @@ add_executable(SoftRenderer
     src/core/pixelbuffer.cpp
     src/core/texture.cpp
     src/io/image.cpp
+    src/io/objloader.cpp
     src/math/vec.cpp
     src/math/mat.cpp
     src/render/rasterizer.cpp
     src/render/renderer.cpp
     src/render/clipper.cpp
+    src/render/blend.cpp
     src/render/lighting.cpp
     src/scene/aabb.cpp
     src/scene/frustum.cpp

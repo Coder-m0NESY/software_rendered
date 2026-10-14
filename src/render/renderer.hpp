@@ -5,6 +5,7 @@
 
 #include "math/mat.hpp"
 #include "math/vec.hpp"
+#include "render/rasterizer.hpp"   // DrawOptions（第 13 步的渲染状态）
 
 class PixelBuffer;
 class Texture;
@@ -50,9 +51,12 @@ void draw_filled_colored(PixelBuffer& fb,
                          int vertex_count,
                          const int (*triangles)[3], int triangle_count);
 
-// 画一个「贴图 + 光照」的实心模型（第 10 步；第 11 步补了裁剪）。
+// 画一个「贴图 + 光照」的实心模型（第 10 步；第 11 步补了裁剪；第 12 步换成索引数组；
+// 第 13 步把零散开关收进 DrawOptions）。
+//   indices     三角形索引表，每 3 个一组（对应 Mesh::indices），长度 = 三角形数 × 3
 //   uvs         和 vertices 一一对应，是每个顶点的贴图坐标
 //   intensities 每个顶点的亮度 0~1（Lambert 算出来的），最终色 = 贴图 × 亮度
+//   options     渲染状态：透视校正 / 采样方式 / Alpha 测试 / 颜色混合 / 写深度
 //
 // 顶点变换和上面那个一样，多出来的是两件事：
 //   ① 先做一次**近平面裁剪**（render/clipper），把跨过近平面的三角形切开，
@@ -63,10 +67,9 @@ void draw_filled_textured(PixelBuffer& fb,
                           const Vec3* vertices, const Vec2* uvs,
                           const float* intensities,
                           int vertex_count,
-                          const int (*triangles)[3], int triangle_count,
+                          const int* indices, int triangle_count,
                           const Texture& texture,
-                          bool perspective_correct,
-                          bool bilinear);
+                          const DrawOptions& options);
 
 }  // namespace renderer
 

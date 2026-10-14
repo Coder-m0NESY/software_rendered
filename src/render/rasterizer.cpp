@@ -3,6 +3,7 @@
 #include "core/color.hpp"
 #include "core/pixelbuffer.hpp"
 #include "core/texture.hpp"
+#include "render/blend.hpp"
 
 #include <cstdlib>   // std::abs
 #include <algorithm>  // std::min, std::max
@@ -181,13 +182,19 @@ uint32_t pack_rgb(const RGBf& c, const SDL_PixelFormat* fmt)
 
 // 贴图颜色 × 光照亮度 = 最终颜色。
 // 白色 255 × 亮度 0.5 = 128，等价于「这张贴图被照暗了一半」。
+//
+// ⚠ 第 13 步：alpha 通道要**原样保留**，不能再写死 255。
+//    之前所有贴图都是不透明的，把 a 拍成 255 没人看得出来；
+//    从这一步起贴图会自带 alpha（半透明的玻璃、镂空的栅栏），
+//    光照只该压暗 RGB，跟透明度无关 —— 在这里把 a 抹掉，
+//    后面 Alpha 测试和颜色混合拿到的就永远是 255，两个开关全部失效。
 Color modulate(const Color& c, float light)
 {
     auto f = [light](uint8_t v) -> uint8_t {
         const float r = static_cast<float>(v) * light;
         return static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, r)));
     };
-    return Color(f(c.r), f(c.g), f(c.b), 255);
+    return Color(f(c.r), f(c.g), f(c.b), c.a);
 }
 
 }  // namespace
@@ -432,8 +439,7 @@ void draw_triangle_textured(PixelBuffer& fb,
                             const ScreenVertex& v1,
                             const ScreenVertex& v2,
                             const Texture& texture,
-                            bool perspective_correct,
-                            bool bilinear)
+                            const DrawOptions& options)
 {
     // 背面剔除（第 11 步）：先整块判一次，省掉整个包围盒的填像素开销。
     // 这一版走的是「裁剪后」的三角形，clipper 的扇形三角化不改变绕序，
@@ -468,13 +474,17 @@ void draw_triangle_textured(PixelBuffer& fb,
 
             // 深度：NDC 的 z 在屏幕空间本来就是线性的，直接插
             const float z = a0 * v0.z + a1 * v1.z + a2 * v2.z;
+
+            // 深度测试照旧。注意：半透明物体**也**要做这一步 ——
+            // 它虽然不写深度，但必须知道「自己前面有没有不透明的东西挡着」，
+            // 被挡住的部分就不该混进来（否则会把藏在前景后面的玻璃画到前面来）。
             if (z >= fb.depth_at(x, y)) continue;   // 更远就不画
 
             // 亮度：0~1 的标量，跟随 uv 一起校正的影响很小，直接线性插值
             const float light = a0 * v0.light + a1 * v1.light + a2 * v2.light;
 
             float u, v;
-            if (perspective_correct) {
+            if (options.perspective_correct) {
                 // 插值 1/w，以及 u/w、v/w —— 这三个在屏幕空间都是线性的
                 const float iw = a0 * v0.invw + a1 * v1.invw + a2 * v2.invw;
                 if (iw > 0.0f) {
@@ -498,11 +508,40 @@ void draw_triangle_textured(PixelBuffer& fb,
                 v = a0 * v0.v + a1 * v1.v + a2 * v2.v;
             }
 
-            const Color texel = bilinear ? texture.sample_bilinear(u, v)
-                                         : texture.sample_nearest(u, v);
+            const Color texel = options.bilinear ? texture.sample_bilinear(u, v)
+                                                 : texture.sample_nearest(u, v);
+            const Color src = modulate(texel, light);
 
-            fb.put_pixel(x, y, modulate(texel, light));
-            fb.set_depth(x, y, z);
+            // ---- ③ 片元处理（第 13 步）----
+            //
+            // 顺序很讲究：Alpha 测试 → 混合 → 写深度，而且要在「深度测试之后、
+            // 真正落笔之前」。理由：
+            //   · 测试放在最前：一个被丢掉的片元连混合都不用算，白省一次读像素；
+            //   · 混合必须在写深度之前：混合要读目标像素的旧颜色，先写深度不影响它，
+            //     但先写颜色再读就晚了 —— 不过更重要的是下面这条；
+            //   · 半透明物体不写深度：它只是「路过」这个像素，不拥有它。
+            //     如果写了深度，后面更近的半透明片元会被它挡掉，玻璃就变成一块死色。
+
+            // ① Alpha 测试：alpha 不达标的片元整个丢掉。
+            //    表现就是「镂空」—— 贴图里 alpha=0 的地方真的成了洞，能看见后面。
+            if (options.alpha_test &&
+                !blend::alpha_test(src.a, options.alpha_threshold)) {
+                continue;   // 不写颜色、不写深度：这个片元当作没来过
+            }
+
+            // ② 颜色混合：不覆盖，而是和这个像素已经画好的颜色（dst）加权平均。
+            //    半透明物体靠它把自己「叠」在背景上。
+            if (options.blend) {
+                const Color dst = fb.get_pixel_color(x, y);
+                fb.put_pixel(x, y, blend::blend_over(src, dst, src.a));
+            } else {
+                fb.put_pixel(x, y, src);
+            }
+
+            // ③ 写深度：由状态控制，半透明物体传 false。
+            if (options.write_depth) {
+                fb.set_depth(x, y, z);
+            }
         }
     }
 }

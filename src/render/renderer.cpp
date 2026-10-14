@@ -5,6 +5,9 @@
 #include "render/clipper.hpp"
 #include "render/rasterizer.hpp"
 
+#include <cstddef>
+#include <vector>
+
 // ===========================================================================
 //  renderer 的实现。
 //  管线的顺序跟教程里那张图一致：
@@ -155,10 +158,9 @@ void renderer::draw_filled_textured(PixelBuffer& fb,
                                     const Vec3* vertices, const Vec2* uvs,
                                     const float* intensities,
                                     int vertex_count,
-                                    const int (*triangles)[3], int triangle_count,
+                                    const int* indices, int triangle_count,
                                     const Texture& texture,
-                                    bool perspective_correct,
-                                    bool bilinear)
+                                    const DrawOptions& options)
 {
     // =======================================================================
     //  第 11 步的关键改动：把「整块丢弃」换成「近平面裁剪」。
@@ -177,13 +179,15 @@ void renderer::draw_filled_textured(PixelBuffer& fb,
     //  因为 w ≤ 0 的点做完除法会把坐标翻到屏幕另一侧。
     // =======================================================================
 
-    constexpr int kMaxVertices = 1024;
-    if (vertex_count > kMaxVertices) {
-        vertex_count = kMaxVertices;
-    }
-
     // ---- ① 顶点变换：只乘到裁剪空间，不除法、不丢点 ----
-    ClipVertex clip_vertices[kMaxVertices];
+    //
+    // ⚠ 第 12 步：顶点数不再写死上限。
+    //    之前是 `ClipVertex clip_vertices[1024]` 而且超了就**静默截断**——
+    //    手写立方体只有 36 个顶点时看不出问题，但从第 12 步起几何数据来自
+    //    .obj 文件，顶点数由文件决定。一个稍精细的模型就会越过 1024，
+    //    表现是「模型缺一块」，而且不报错、不打印，非常难查。
+    //    改成 std::vector：上限交给内存，再也不用猜模型有多大。
+    std::vector<ClipVertex> clip_vertices(static_cast<std::size_t>(vertex_count));
     for (int i = 0; i < vertex_count; ++i) {
         clip_vertices[i].position = mvp * vertices[i];
         clip_vertices[i].uv       = uvs[i];
@@ -192,10 +196,14 @@ void renderer::draw_filled_textured(PixelBuffer& fb,
 
     // ---- ② 逐三角形：裁剪 → ③ 透视除法 + 视口 → ④ 光栅化 ----
     for (int t = 0; t < triangle_count; ++t) {
+        const int i0 = indices[t * 3 + 0];
+        const int i1 = indices[t * 3 + 1];
+        const int i2 = indices[t * 3 + 2];
+
         const ClipVertex input[3] = {
-            clip_vertices[triangles[t][0]],
-            clip_vertices[triangles[t][1]],
-            clip_vertices[triangles[t][2]],
+            clip_vertices[i0],
+            clip_vertices[i1],
+            clip_vertices[i2],
         };
 
         // 切一刀最多变出 2 个三角形，输出顶点紧挨着放：
@@ -220,8 +228,7 @@ void renderer::draw_filled_textured(PixelBuffer& fb,
                 sv[k].light = cv.light;
             }
 
-            draw_triangle_textured(fb, sv[0], sv[1], sv[2],
-                                   texture, perspective_correct, bilinear);
+            draw_triangle_textured(fb, sv[0], sv[1], sv[2], texture, options);
         }
     }
 }
