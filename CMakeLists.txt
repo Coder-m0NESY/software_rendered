@@ -37,6 +37,7 @@ add_executable(SoftRenderer
     src/core/window.cpp
     src/core/pixelbuffer.cpp
     src/core/texture.cpp
+    src/core/text.cpp
     src/io/image.cpp
     src/io/objloader.cpp
     src/math/vec.cpp

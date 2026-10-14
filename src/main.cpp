@@ -20,19 +20,21 @@
 // 顺便把这堆开关收进了一个 DrawOptions 结构体（见 rasterizer.hpp）：
 // 透视校正 / 采样方式 / Alpha 测试 / 颜色混合 / 写深度，一次全带走。
 //
-// ---- 两种运行方式（第 12 步验收里「能加载任意模型」的补做）----
+// ---- 三种运行方式（第 12 步验收里「能加载任意模型」的补做）----
 //   ① 默认（不带参数）：跑上面那套演示场景，用来演示第 13 步的效果。
-//   ② 单模型查看：命令行给一个 .obj，或者把 .obj 文件直接拖进窗口 ——
-//      程序清空场景、只显示这一个模型。加载后会**自动居中 + 缩放到统一大小**，
-//      否则不同来源的模型尺度能差几个数量级（角色 1.4 米、零件 0.001），
-//      相机根本对不上焦。
+//      画面左上角会把 models/ 里的 .obj 列出来，**按数字键 1~9** 就能换成它。
+//   ② 命令行给一个 .obj：直接进单模型查看模式。
 //          SoftRenderer.exe 路径\to\model.obj
+//   ③ 把 .obj 文件从资源管理器拖进窗口：随时换模型，自动切到查看模式。
+//   单模型查看会**自动居中 + 缩放到统一大小**，否则不同来源的模型尺度能差
+//   好几个数量级（角色 1.4 米、零件 0.001），相机根本对不上焦。
 //
 // 键盘：
 //   T  切换透视校正 开/关
 //   B  切换采样方式 双线性/最近邻
 //   A  切换 Alpha 测试 开/关（看后墙的栅栏变成整块板）
 //   M  切换颜色混合 开/关（看玻璃球变回实心）
+//   1~9  左上角列表里的第 N 个模型（对应 models/ 里按文件名排序的第 N 个）
 //   鼠标左键拖动  转相机
 //
 // 验收：
@@ -53,6 +55,7 @@
 
 #include "core/color.hpp"
 #include "core/pixelbuffer.hpp"
+#include "core/text.hpp"
 #include "core/texture.hpp"
 #include "core/window.hpp"
 #include "io/image.hpp"
@@ -68,6 +71,7 @@
 #include <algorithm>   // std::clamp / std::max
 #include <cmath>       // std::sin / std::cos
 #include <cstdio>
+#include <filesystem>  // 从完整路径里抠出文件名
 #include <string>      // std::string（命令行参数、拖拽来的路径）
 #include <utility>     // std::move
 #include <vector>
@@ -169,12 +173,33 @@ int main(int argc, char* argv[])
     //    能看清形状和棱角（贴彩色反而干扰判断）。
     const Texture gray_tex(8, 8, Color(206, 206, 212));
 
-    // ---- 3. 命令行参数：有参数 = 单模型查看模式 ----
+    // ---- 3. 扫 models/：列出可以直接切换的模型 ----
+    // 候选目录按顺序试，谁先有 .obj 就用谁 —— exe 在 build/ 下双击跑时
+    // 模型在 ../models，在项目根目录用终端跑时在 models，两种都得能用。
+    const std::vector<std::string> model_files =
+        io::find_obj_files({"models", "../models", "../../models"});
+
+    // 列表里只显示文件名（完整路径太长，HUD 那点地方放不下）。
+    // 太长的名字掐掉中间，留头留尾 + ".."，比直接截断后半截更好认。
+    std::vector<std::string> model_names;
+    model_names.reserve(model_files.size());
+    for (const std::string& path : model_files) {
+        std::string name = std::filesystem::path(path).filename().string();
+        if (name.size() > 20) {
+            name = name.substr(0, 9) + ".." + name.substr(name.size() - 9);
+        }
+        model_names.push_back(name);
+    }
+
+    // ---- 4. 命令行参数：有参数 = 单模型查看模式 ----
     // argv[1] 是 .obj 路径。带参数就只显示这一个模型；不带就跑演示场景。
     const std::string model_path = (argc > 1) ? std::string(argv[1]) : std::string();
     bool viewer_mode = !model_path.empty();
 
-    // ---- 4. 几何数据 ----
+    // 当前在看列表里的第几个（-1 = 不是列表里的模型，比如命令行直接给的路径）
+    int current_model = -1;
+
+    // ---- 5. 几何数据 ----
     // 这几个 Mesh 都声明在 main 的作用域里（而不是塞进 if 块里）：
     // items 里存的是**指向它们的指针**，变量一离开作用域就没了，
     // 渲染循环会读到野指针。所以「变量」得一直活着，内容按模式在后面填。
@@ -183,7 +208,7 @@ int main(int argc, char* argv[])
     Mesh floor_mesh;    // 演示场景：地板
     Mesh panel_mesh;    // 演示场景：后墙
 
-    // ---- 5. 组装场景 ----
+    // ---- 6. 组装场景 ----
     constexpr float kPi = 3.14159265358979f;
 
     Scene scene;
@@ -331,7 +356,7 @@ int main(int argc, char* argv[])
                     scene.object_count(), kRingCount * 2);
     }
 
-    // ---- 6. 投影 + 相机状态 ----
+    // ---- 7. 投影 + 相机状态 ----
     const Mat44 projection = Mat44::perspective(kPi / 3.0f,
                                                 static_cast<float>(kWidth) /
                                                     static_cast<float>(kHeight),
@@ -358,16 +383,78 @@ int main(int argc, char* argv[])
     // 上一次打印过的「可见数」，只在变化时打日志，免得刷屏
     int last_visible = -1;
 
-    // ---- 7. 主循环 ----
+    // 左上角的模型列表（HUD）。
+    // 单纯为了「运行后不用敲命令行就能选模型」—— 跟渲染管线无关，
+    // 所以它只是拿第 13 步算完的画面当底，往上盖几行点阵字。
+    auto draw_model_hud = [&]() {
+        const int lines = std::min<int>(9, static_cast<int>(model_names.size()));
+        if (lines <= 0) {
+            // 没找到模型就什么都不画（比如别人 clone 下来还没生成 assets 的时候）
+            return;
+        }
+
+        constexpr int kScale = 2;
+        constexpr int kPad   = 8;
+        const int lh    = text::line_height(kScale);
+        const int box_w = 300;
+        const int box_h = kPad * 2 + lh * (lines + 1);   // +1 是标题那一行
+
+        // 先垫一层深色底板：字是浅色的，直接压在天蓝渐变上会看不清。
+        // （这块不参与混合，纯覆盖 —— 反正画在所有物体之后。）
+        buffer.draw_filled_rect(8, 8, box_w, box_h, Color(14, 18, 26));
+
+        text::draw(buffer, 8 + kPad, 8 + kPad, "MODELS  KEYS 1-9",
+                   Color(132, 146, 164), kScale);
+
+        for (int i = 0; i < lines; ++i) {
+            const std::string line = "[" + std::to_string(i + 1) + "] " + model_names[i];
+            // 当前正在看的那个用暖色标出来，其余是浅灰
+            const Color color = (i == current_model) ? Color(255, 206, 120)
+                                                      : Color(198, 208, 220);
+            text::draw(buffer, 8 + kPad, 8 + kPad + lh * (i + 1), line, color, kScale);
+        }
+    };
+
+    // 按路径在列表里找回下标（对不上 = -1）。
+    // 拖进来的文件、命令行给的路径，都可能正好是列表里的某一个，
+    // 对上之后 HUD 才能正确高亮。
+    auto index_of_model = [&](const std::string& path) -> int {
+        const std::string name = std::filesystem::path(path).filename().string();
+        for (int i = 0; i < static_cast<int>(model_files.size()); ++i) {
+            if (std::filesystem::path(model_files[i]).filename().string() == name) {
+                return i;
+            }
+        }
+        return -1;
+    };
+
+    // 命令行给的路径如果正好在列表里，把高亮对上（对不上就保持 -1）
+    if (viewer_mode) {
+        current_model = index_of_model(model_path);
+    }
+
+    // ---- 8. 主循环 ----
     while (!window.closed()) {
         window.poll_events();
+
+        // ---- 数字键 1~9：换成 models/ 列表里的第 N 个 ----
+        // （SDLK_1..SDLK_9 在 SDL 里是连续的，所以可以直接加）
+        for (int i = 0; i < 9 && i < static_cast<int>(model_files.size()); ++i) {
+            if (window.key_pressed(SDLK_1 + i) && load_viewer_model(model_files[i])) {
+                viewer_mode   = true;
+                current_model = i;
+                yaw   = 0.0f;   // 换了模型，视角回到正面
+                pitch = 0.0f;
+            }
+        }
 
         // ---- 把一个 .obj 拖进窗口 → 换成它（顺手切到查看模式）----
         // 拖拽是「事件」，所以必须在 poll_events() 之后、拿这一帧的状态判断。
         if (!window.drop_file().empty()) {
             const std::string& dropped = window.drop_file();
             if (load_viewer_model(dropped)) {
-                viewer_mode = true;
+                viewer_mode   = true;
+                current_model = index_of_model(dropped);
                 yaw   = 0.0f;   // 换了模型，视角回到正面
                 pitch = 0.0f;
             }
@@ -496,6 +583,9 @@ int main(int argc, char* argv[])
                                            *item.texture,
                                            opts);
         }
+
+        // HUD 最后画：盖在所有物体上面，且不受深度测试影响。
+        draw_model_hud();
 
         window.present(static_cast<const std::uint32_t*>(buffer.surface()->pixels));
     }

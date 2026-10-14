@@ -1,7 +1,10 @@
 #include "io/objloader.hpp"
 
+#include <algorithm>   // std::sort / std::transform
+#include <cctype>      // std::tolower
 #include <cstdio>
 #include <cstdlib>   // std::atoi
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -242,6 +245,49 @@ bool load_obj(const std::string& path, Mesh& out)
     std::printf("[模型] 已加载 %s（%d 顶点，%d 三角形）\n",
                 path.c_str(), out.vertex_count(), out.triangle_count());
     return true;
+}
+
+std::vector<std::string> find_obj_files(const std::vector<std::string>& dirs)
+{
+    namespace fs = std::filesystem;
+
+    // 把后缀统一成小写再比，这样 .OBJ / .Obj 也能认。
+    auto is_obj = [](const fs::path& p) {
+        std::string ext = p.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return ext == ".obj";
+    };
+
+    for (const std::string& dir : dirs) {
+        // 用带 error_code 的重载：目录不存在/没权限是「正常情况」（就是换个目录再找），
+        // 不该抛异常把整个程序掀了。
+        std::error_code ec;
+        if (!fs::is_directory(dir, ec)) {
+            continue;
+        }
+
+        std::vector<std::string> found;
+        for (const fs::directory_entry& e : fs::directory_iterator(dir, ec)) {
+            if (!e.is_regular_file(ec)) {
+                continue;
+            }
+            if (is_obj(e.path())) {
+                found.push_back(e.path().string());
+            }
+        }
+
+        if (!found.empty()) {
+            // 按文件名排序：这样「按 1/2/3 选」的顺序在每台机器上都一样，
+            // 不会因为文件系统的返回顺序不同而变来变去。
+            std::sort(found.begin(), found.end());
+            std::printf("[模型] 在 %s 里找到 %d 个 .obj\n", dir.c_str(),
+                        static_cast<int>(found.size()));
+            return found;
+        }
+    }
+
+    return {};
 }
 
 }   // namespace io

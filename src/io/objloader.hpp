@@ -2,6 +2,7 @@
 #define OBJLOADER_HPP
 
 #include <string>
+#include <vector>
 
 #include "scene/mesh.hpp"
 
@@ -33,6 +34,13 @@ namespace io {
 //   - 缺 vt：填 (0,0)
 //   - 四边形/多边形：以第 0 个角为扇心，扇形三角化
 bool load_obj(const std::string& path, Mesh& out);
+
+// 在几个候选目录里找 .obj 文件（不递归），按文件名排序返回**完整路径**。
+//
+// 为什么给一串目录：exe 在 build/ 下双击跑时模型在 ../models，
+// 在项目根目录用终端跑时在 models —— 两种都该能用，所以按顺序试，
+// 谁先命中就用谁。全都命中不了就返回空。
+std::vector<std::string> find_obj_files(const std::vector<std::string>& dirs);
 
 }   // namespace io
 
