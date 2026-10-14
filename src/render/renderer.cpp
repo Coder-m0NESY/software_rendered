@@ -2,6 +2,7 @@
 
 #include "core/pixelbuffer.hpp"
 #include "core/texture.hpp"
+#include "render/clipper.hpp"
 #include "render/rasterizer.hpp"
 
 // ===========================================================================
@@ -159,38 +160,68 @@ void renderer::draw_filled_textured(PixelBuffer& fb,
                                     bool perspective_correct,
                                     bool bilinear)
 {
+    // =======================================================================
+    //  第 11 步的关键改动：把「整块丢弃」换成「近平面裁剪」。
+    //
+    //  改造前（第 10 步）：
+    //      clip.w < 1e-6 → visible[i] = false → 凡是用到这个顶点的三角形
+    //      整块不画。后果就是「地板不敢铺大」：只要有一个角跑到相机背后，
+    //      连着它的那块三角形就会整块消失，画面缺一块。
+    //
+    //  改造后：
+    //      顶点一个都不丢，全部以**裁剪空间**坐标留着；
+    //      三角形送进 clipper，让近平面切一刀，切出来的碎块照常画。
+    //      于是相机贴脸时画面只是被正确地切掉一部分，不会有穿屏的三角形飞出来。
+    //
+    //  顺序仍然是老规矩：裁剪 → 透视除法 → 视口。裁剪必须在前，
+    //  因为 w ≤ 0 的点做完除法会把坐标翻到屏幕另一侧。
+    // =======================================================================
+
     constexpr int kMaxVertices = 1024;
     if (vertex_count > kMaxVertices) {
         vertex_count = kMaxVertices;
     }
 
-    ScreenVertex sv[kMaxVertices];
-    bool visible[kMaxVertices];
-
+    // ---- ① 顶点变换：只乘到裁剪空间，不除法、不丢点 ----
+    ClipVertex clip_vertices[kMaxVertices];
     for (int i = 0; i < vertex_count; ++i) {
-        const Vec4 clip = mvp * vertices[i];
-        if (clip.w < 1e-6f) {
-            // w 太小（顶点贴在相机平面上甚至背后），透视除法会炸，直接丢掉
-            visible[i] = false;
-            continue;
-        }
-        visible[i] = true;
-
-        const Vec4 ndc = clip.perspectiveDivide();
-        viewport(ndc.x, ndc.y, fb.width(), fb.height(), sv[i].x, sv[i].y);
-        sv[i].z     = ndc.z;             // 深度测试用（NDC z，和缓冲初始值同空间）
-        sv[i].invw  = 1.0f / clip.w;     // 透视校正的关键：存 1/w，不存 w
-        sv[i].u     = uvs[i].x;
-        sv[i].v     = uvs[i].y;
-        sv[i].light = intensities[i];
+        clip_vertices[i].position = mvp * vertices[i];
+        clip_vertices[i].uv       = uvs[i];
+        clip_vertices[i].light    = intensities[i];
     }
 
+    // ---- ② 逐三角形：裁剪 → ③ 透视除法 + 视口 → ④ 光栅化 ----
     for (int t = 0; t < triangle_count; ++t) {
-        const int a = triangles[t][0];
-        const int b = triangles[t][1];
-        const int c = triangles[t][2];
-        if (!visible[a] || !visible[b] || !visible[c]) continue;
-        draw_triangle_textured(fb, sv[a], sv[b], sv[c],
-                               texture, perspective_correct, bilinear);
+        const ClipVertex input[3] = {
+            clip_vertices[triangles[t][0]],
+            clip_vertices[triangles[t][1]],
+            clip_vertices[triangles[t][2]],
+        };
+
+        // 切一刀最多变出 2 个三角形，输出顶点紧挨着放：
+        // 第 p 个三角形的三个顶点在 output[p*3 .. p*3+2]
+        ClipVertex output[clipper::kMaxOutputTriangles * 3];
+        const int piece_count = clipper::clip_near_plane(input, output);
+
+        for (int p = 0; p < piece_count; ++p) {
+            ScreenVertex sv[3];
+            for (int k = 0; k < 3; ++k) {
+                const ClipVertex& cv = output[p * 3 + k];
+
+                // 裁剪保证了 w >= near > 0，所以这里的除法是安全的
+                const Vec4 ndc = cv.position.perspectiveDivide();
+                viewport(ndc.x, ndc.y, fb.width(), fb.height(),
+                         sv[k].x, sv[k].y);
+
+                sv[k].z     = ndc.z;                    // 深度测试用
+                sv[k].invw  = 1.0f / cv.position.w;     // 透视校正的关键：存 1/w
+                sv[k].u     = cv.uv.x;
+                sv[k].v     = cv.uv.y;
+                sv[k].light = cv.light;
+            }
+
+            draw_triangle_textured(fb, sv[0], sv[1], sv[2],
+                                   texture, perspective_correct, bilinear);
+        }
     }
 }

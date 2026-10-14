@@ -50,12 +50,14 @@ void draw_filled_colored(PixelBuffer& fb,
                          int vertex_count,
                          const int (*triangles)[3], int triangle_count);
 
-// 画一个「贴图 + 光照」的实心模型（第 10 步）。
+// 画一个「贴图 + 光照」的实心模型（第 10 步；第 11 步补了裁剪）。
 //   uvs         和 vertices 一一对应，是每个顶点的贴图坐标
 //   intensities 每个顶点的亮度 0~1（Lambert 算出来的），最终色 = 贴图 × 亮度
 //
-// 顶点变换这一半和上面那个完全一样，多出来的是：算完透视除法后，
-// 把 1/w 也一起存下来交给光栅化器——透视校正就靠它。
+// 顶点变换和上面那个一样，多出来的是两件事：
+//   ① 先做一次**近平面裁剪**（render/clipper），把跨过近平面的三角形切开，
+//      切完的碎片再走透视除法——所以这里送进光栅化器的三角形一定都在近平面之内；
+//   ② 算完透视除法后，把 1/w 也存下来交给光栅化器——透视校正就靠它。
 void draw_filled_textured(PixelBuffer& fb,
                           const Mat44& mvp,
                           const Vec3* vertices, const Vec2* uvs,

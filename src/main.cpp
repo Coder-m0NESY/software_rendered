@@ -1,17 +1,41 @@
-// 学习路线第 10 步：纹理 + 透视校正。
+// 学习路线第 11 步：背面剔除 + 视锥剔除 + 近平面裁剪。
 //
-// 在第 9 步（Lambert 光照 + 鼠标相机）的基础上：
-//   ① 给 Vertex 加上 UV，并新建 core/texture（棋盘格 + 最近邻/双线性采样）
-//   ② 光栅化时用「uv/w 与 1/w 插值」做透视校正采样
-//   ③ 最终颜色 = 贴图颜色 × 光照亮度
+// 在第 10 步（纹理 + 透视校正）的基础上加了三件事：
+//   ① 背面剔除   —— 屏幕空间有向面积 <= 0 的三角形，在填像素前整块丢掉
+//                    （render/rasterizer.cpp，最省事的一个）
+//   ② 近平面裁剪 —— Sutherland-Hodgman 把跨过近平面的三角形切开
+//                    （render/clipper.cpp，最难的一个）
+//   ③ 视锥剔除   —— 每个物体算个包围盒，跟视锥六个面比一下，全在外面就跳过
+//                    （scene/aabb + scene/frustum + scene/scene，CPU 侧的事）
 //
-// 键盘（做对照实验用）：
+// 场景改成「Scene 驱动」：一块大地板 + 中央立方体 + 两圈小立方体。
+// 后两样是为了让「视锥剔除」看得见——小立方体放在半径 14 / 26 的圆上，
+// 转动相机时控制台会打印「可见 N / M」，数字跟着视野变。
+//
+// 另一个附带的好处：第 10 步因为「整块丢弃」而不敢铺大的地板，
+// 现在裁剪做完，可以一路铺到地平线，转相机也不会缺块。
+//
+// 键盘：
 //   T  切换透视校正 开/关  —— 关掉看一眼真实的扭曲
 //   B  切换采样方式 双线性/最近邻
 //   鼠标左键拖动  转相机
 //
-// 验收：棋盘格近大远小、不扭曲；按 T 关掉校正后，斜面上的格子明显被拉歪。
+// 验收：
+//   - 地板铺到地平线，怎么转都不缺块（裁剪）
+//   - 相机贴到立方体上，画面正常被切，没有横穿全屏的三角形飞出来（裁剪）
+//   - 转动相机，「可见 N / M」跟着变（视锥剔除）
+//   - 立方体外观和第 10 步一致（背面剔除不该让画面变样，它只省算力）
 #include <SDL.h>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 #include "core/color.hpp"
 #include "core/pixelbuffer.hpp"
@@ -22,19 +46,49 @@
 #include "math/vec.hpp"
 #include "render/lighting.hpp"
 #include "render/renderer.hpp"
+#include "scene/aabb.hpp"
+#include "scene/scene.hpp"
 #include "scene/vertex.hpp"
 
 #include <algorithm>   // std::clamp
 #include <cmath>
 #include <cstdio>
+#include <vector>
+
+namespace {
+
+// 渲染一个物体时要交给 renderer 的那点东西。
+// Scene 只管「谁该画」，顶点属性（UV、亮度）还是 main 自己拿着。
+struct RenderItem {
+    int          scene_index = -1;             // 对应 Scene 里的第几个物体
+    const Vec3*  positions   = nullptr;
+    const Vec3*  normals     = nullptr;
+    const Vec2*  uvs         = nullptr;
+    int          vertex_count = 0;
+    const int  (*triangles)[3] = nullptr;
+    int          triangle_count = 0;
+    Mat44        model;                        // 模型矩阵（默认全零，必须显式赋）
+};
+
+}   // namespace
 
 int main(int argc, char* argv[])
 {
+#if defined(_WIN32)
+    // Windows 控制台默认是 GBK(936) 代码页，而本文件里的字符串是 UTF-8，
+    // 直接 printf 中文就会显示成乱码。把控制台输入/输出都切成 UTF-8 即可。
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+    // 本程序会一直渲染、正常退出前不返回，stdout 又是全缓冲，
+    // 日志会攒在缓冲区里不显示。这里改成不缓冲，printf 立刻可见。
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+#endif
+
     // ---- 1. 窗口和画布 ----
     constexpr int kWidth  = 800;
     constexpr int kHeight = 600;
 
-    Window window("SoftRenderer - textured cube", kWidth, kHeight);
+    Window window("SoftRenderer - culling & clipping", kWidth, kHeight);
     if (window.closed()) {
         std::printf("window creation failed\n");
         return 1;
@@ -48,53 +102,7 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // ---- 2. 36 顶点立方体：每面 6 个顶点（2 三角形 × 3 顶点），各带独立法线、UV ----
-    // 每个面的两个三角形共享位置但不共享法线——因为不同面法线不一样。
-    // 绕序约定：从立方体外面看是逆时针（CCW）。
-    //
-    // UV 的取法：每个面都铺满一整张贴图，也就是该面的 4 个角对应
-    // (0,0)(1,0)(0,1)(1,1)。同一张棋盘格贴在 6 个面上，转起来能看出
-    // 每个面的格子大小都不一样（近大远小），也方便对比透视校正的效果。
-    const Vertex vertices[36] = {
-        // 远面 z=-1，法线 (0,0,-1)，从 -z 方向看
-        { Vec3(-1,-1,-1), Vec3(0,0,-1), Vec2(0,1) }, { Vec3( 1,-1,-1), Vec3(0,0,-1), Vec2(1,1) }, { Vec3( 1, 1,-1), Vec3(0,0,-1), Vec2(1,0) },
-        { Vec3(-1,-1,-1), Vec3(0,0,-1), Vec2(0,1) }, { Vec3( 1, 1,-1), Vec3(0,0,-1), Vec2(1,0) }, { Vec3(-1, 1,-1), Vec3(0,0,-1), Vec2(0,0) },
-        // 近面 z=+1，法线 (0,0,+1)，从 +z 方向看
-        { Vec3(-1,-1, 1), Vec3(0,0, 1), Vec2(0,1) }, { Vec3(-1, 1, 1), Vec3(0,0, 1), Vec2(0,0) }, { Vec3( 1, 1, 1), Vec3(0,0, 1), Vec2(1,0) },
-        { Vec3(-1,-1, 1), Vec3(0,0, 1), Vec2(0,1) }, { Vec3( 1, 1, 1), Vec3(0,0, 1), Vec2(1,0) }, { Vec3( 1,-1, 1), Vec3(0,0, 1), Vec2(1,1) },
-        // 底面 y=-1，法线 (0,-1,0)，从 -y 方向看
-        { Vec3(-1,-1,-1), Vec3(0,-1,0), Vec2(0,0) }, { Vec3(-1,-1, 1), Vec3(0,-1,0), Vec2(0,1) }, { Vec3( 1,-1, 1), Vec3(0,-1,0), Vec2(1,1) },
-        { Vec3(-1,-1,-1), Vec3(0,-1,0), Vec2(0,0) }, { Vec3( 1,-1, 1), Vec3(0,-1,0), Vec2(1,1) }, { Vec3( 1,-1,-1), Vec3(0,-1,0), Vec2(1,0) },
-        // 顶面 y=+1，法线 (0,+1,0)，从 +y 方向看
-        { Vec3(-1, 1,-1), Vec3(0, 1,0), Vec2(0,0) }, { Vec3( 1, 1, 1), Vec3(0, 1,0), Vec2(1,1) }, { Vec3(-1, 1, 1), Vec3(0, 1,0), Vec2(0,1) },
-        { Vec3(-1, 1,-1), Vec3(0, 1,0), Vec2(0,0) }, { Vec3( 1, 1,-1), Vec3(0, 1,0), Vec2(1,0) }, { Vec3( 1, 1, 1), Vec3(0, 1,0), Vec2(1,1) },
-        // 左面 x=-1，法线 (-1,0,0)，从 -x 方向看
-        { Vec3(-1,-1,-1), Vec3(-1,0,0), Vec2(0,1) }, { Vec3(-1,-1, 1), Vec3(-1,0,0), Vec2(1,1) }, { Vec3(-1, 1, 1), Vec3(-1,0,0), Vec2(1,0) },
-        { Vec3(-1,-1,-1), Vec3(-1,0,0), Vec2(0,1) }, { Vec3(-1, 1, 1), Vec3(-1,0,0), Vec2(1,0) }, { Vec3(-1, 1,-1), Vec3(-1,0,0), Vec2(0,0) },
-        // 右面 x=+1，法线 (+1,0,0)，从 +x 方向看
-        { Vec3( 1,-1,-1), Vec3( 1,0,0), Vec2(0,1) }, { Vec3( 1, 1, 1), Vec3( 1,0,0), Vec2(1,0) }, { Vec3( 1,-1, 1), Vec3( 1,0,0), Vec2(1,1) },
-        { Vec3( 1,-1,-1), Vec3( 1,0,0), Vec2(0,1) }, { Vec3( 1, 1,-1), Vec3( 1,0,0), Vec2(0,0) }, { Vec3( 1, 1, 1), Vec3( 1,0,0), Vec2(1,0) },
-    };
-
-    // 三角形表：连续下标，每三个一组组成一个三角形。
-    const int triangles[12][3] = {
-        { 0, 1, 2}, { 3, 4, 5},   // 远面
-        { 6, 7, 8}, { 9,10,11},   // 近面
-        {12,13,14}, {15,16,17},   // 底面
-        {18,19,20}, {21,22,23},   // 顶面
-        {24,25,26}, {27,28,29},   // 左面
-        {30,31,32}, {33,34,35},   // 右面
-    };
-
-    // ---- 3. 贴图：优先读一张真实图片；读不到就退回代码生成的棋盘格 ----
-    // assets/texture_brick.bmp 是 512×512 的石头砖墙，能平铺。
-    // 为什么是 BMP：SDL2 自带 SDL_LoadBMP，不用额外依赖 SDL_image（见 io/image.hpp）。
-    //
-    // 失败就退回棋盘格，是为了「贴图丢了程序也能跑」—— 加载文件属于系统边界，
-    // 这里必须处理，而不是相信文件一定在。控制台会打一行说明走了哪条路。
-    //
-    // 注意：load_texture_bmp 只在成功时才写 out，失败时 out 保持原样。
-    // 所以这里先让它等于棋盘格，读盘失败就自动是对照用的棋盘格，不用另存一份。
+    // ---- 2. 贴图：优先读一张真实图片，读不到就退回代码生成的棋盘格 ----
     Texture texture = Texture::make_checkerboard(64, 8, Color(235, 235, 235), Color(50, 58, 78));
     if (io::load_texture_bmp("assets/texture_brick.bmp", texture)) {
         std::printf("[贴图] 已加载 assets/texture_brick.bmp（%d×%d）\n",
@@ -103,61 +111,153 @@ int main(int argc, char* argv[])
         std::printf("[贴图] 加载失败，退回代码生成的棋盘格\n");
     }
 
-    // ---- 4. 地板：一块 6×6 的大四边形（2 个三角形），把同一张贴图重复铺开 ----
-    // 为什么非要加个地板：透视校正的扭曲在「斜着看的大平面」上最明显。
-    // 立方体每个面跨度只有 2 个单位、又基本正对相机，光看立方体几乎看不出
-    // 校正与不校正的差别；地板从近铺到远，一格的宽窄变化一眼就能看出来 ——
-    // 这就是「近大远小」。
+    // ---- 3. 立方体网格：36 顶点，每面 6 个（2 三角形 × 3 顶点），带独立法线、UV ----
+    // 绕序约定：从立方体外面看是顺时针（CW）——第 11 步的背面剔除**依赖**这个约定。
+    // （屏幕 y 轴向下，正面在屏幕空间的有向面积 > 0，恰好对应「从外面看顺时针」。）
+    const Vertex cube_vertices[36] = {
+        // 远面 z=-1，法线 (0,0,-1)
+        { Vec3(-1,-1,-1), Vec3(0,0,-1), Vec2(0,1) }, { Vec3( 1,-1,-1), Vec3(0,0,-1), Vec2(1,1) }, { Vec3( 1, 1,-1), Vec3(0,0,-1), Vec2(1,0) },
+        { Vec3(-1,-1,-1), Vec3(0,0,-1), Vec2(0,1) }, { Vec3( 1, 1,-1), Vec3(0,0,-1), Vec2(1,0) }, { Vec3(-1, 1,-1), Vec3(0,0,-1), Vec2(0,0) },
+        // 近面 z=+1，法线 (0,0,+1)
+        { Vec3(-1,-1, 1), Vec3(0,0, 1), Vec2(0,1) }, { Vec3(-1, 1, 1), Vec3(0,0, 1), Vec2(0,0) }, { Vec3( 1, 1, 1), Vec3(0,0, 1), Vec2(1,0) },
+        { Vec3(-1,-1, 1), Vec3(0,0, 1), Vec2(0,1) }, { Vec3( 1, 1, 1), Vec3(0,0, 1), Vec2(1,0) }, { Vec3( 1,-1, 1), Vec3(0,0, 1), Vec2(1,1) },
+        // 底面 y=-1，法线 (0,-1,0)
+        { Vec3(-1,-1,-1), Vec3(0,-1,0), Vec2(0,0) }, { Vec3(-1,-1, 1), Vec3(0,-1,0), Vec2(0,1) }, { Vec3( 1,-1, 1), Vec3(0,-1,0), Vec2(1,1) },
+        { Vec3(-1,-1,-1), Vec3(0,-1,0), Vec2(0,0) }, { Vec3( 1,-1, 1), Vec3(0,-1,0), Vec2(1,1) }, { Vec3( 1,-1,-1), Vec3(0,-1,0), Vec2(1,0) },
+        // 顶面 y=+1，法线 (0,+1,0)
+        { Vec3(-1, 1,-1), Vec3(0, 1,0), Vec2(0,0) }, { Vec3( 1, 1, 1), Vec3(0, 1,0), Vec2(1,1) }, { Vec3(-1, 1, 1), Vec3(0, 1,0), Vec2(0,1) },
+        { Vec3(-1, 1,-1), Vec3(0, 1,0), Vec2(0,0) }, { Vec3( 1, 1,-1), Vec3(0, 1,0), Vec2(1,0) }, { Vec3( 1, 1, 1), Vec3(0, 1,0), Vec2(1,1) },
+        // 左面 x=-1，法线 (-1,0,0)
+        // ⚠ 第 11 步修正：从外面看这面的缠绕方向原本和其余五面相反，背面剔除一开
+        //    就会把左面当成正面留下（贴脸时正面被近平面切掉，它就露出来了）。
+        //    对调每条三角形的后两个顶点即可把绕序摆正。
+        { Vec3(-1,-1,-1), Vec3(-1,0,0), Vec2(0,1) }, { Vec3(-1, 1, 1), Vec3(-1,0,0), Vec2(1,0) }, { Vec3(-1,-1, 1), Vec3(-1,0,0), Vec2(1,1) },
+        { Vec3(-1,-1,-1), Vec3(-1,0,0), Vec2(0,1) }, { Vec3(-1, 1,-1), Vec3(-1,0,0), Vec2(0,0) }, { Vec3(-1, 1, 1), Vec3(-1,0,0), Vec2(1,0) },
+        // 右面 x=+1，法线 (+1,0,0)（同样在第 11 步修正了绕序）
+        { Vec3( 1,-1,-1), Vec3( 1,0,0), Vec2(0,1) }, { Vec3( 1,-1, 1), Vec3( 1,0,0), Vec2(1,1) }, { Vec3( 1, 1, 1), Vec3( 1,0,0), Vec2(1,0) },
+        { Vec3( 1,-1,-1), Vec3( 1,0,0), Vec2(0,1) }, { Vec3( 1, 1, 1), Vec3( 1,0,0), Vec2(1,0) }, { Vec3( 1, 1,-1), Vec3( 1,0,0), Vec2(0,0) },
+    };
+
+    const int cube_triangles[12][3] = {
+        { 0, 1, 2}, { 3, 4, 5},   // 远面
+        { 6, 7, 8}, { 9,10,11},   // 近面
+        {12,13,14}, {15,16,17},   // 底面
+        {18,19,20}, {21,22,23},   // 顶面
+        {24,25,26}, {27,28,29},   // 左面
+        {30,31,32}, {33,34,35},   // 右面
+    };
+
+    // renderer 要的是「一串连续的 Vec3 / Vec2」，而 Vertex 是结构体数组，
+    // 所以位置、法线、UV 各拷一份出来（初始化一次就够）。
+    constexpr int kCubeVertexCount = 36;
+    Vec3 cube_positions[kCubeVertexCount];
+    Vec3 cube_normals[kCubeVertexCount];
+    Vec2 cube_uvs[kCubeVertexCount];
+    for (int i = 0; i < kCubeVertexCount; ++i) {
+        cube_positions[i] = cube_vertices[i].position;
+        cube_normals[i]   = cube_vertices[i].normal;
+        cube_uvs[i]       = cube_vertices[i].uv;
+    }
+
+    // ---- 4. 地板：一块大地板（4 顶点 2 三角形），从近处一路铺到地平线 ----
     //
-    // UV 取「世界坐标 ÷ 2」：一个贴图周期对应 2 个世界单位，和立方体一个面
-    // 同样大，于是地板和立方体的格子尺寸一致。UV 范围是 [-1.5, 1.5]，超出 [0,1]
-    // 的部分靠 Texture 内部的 wrap 平铺出去 —— 这就是「重复平铺」（tiling）。
+    // ⚠ 第 10 步这块只有 6×6，注释里写着「不能铺大，否则有顶点跑到相机背后，
+    //    renderer 会把整块三角形丢掉，地板缺一块」。第 11 步裁剪到位之后，
+    //    这个约束**解除了** —— 直接铺 100×100。
     //
-    // ⚠ 尺寸不是随手定的：现在还没有做裁剪（那是第 11 步），
-    // renderer 会把「有一个顶点跑到相机背后」的三角形整个丢掉，
-    // 地板就会缺一块。要让地板永远完整，必须保证它离原点最远的角
-    // （√(3² + 3² + 1²) ≈ 4.36）比相机到原点的距离（下面 r = 5）更近。
-    // 这就是「为什么这一步的地板不敢铺大」的真正原因。
+    // UV 取「世界坐标 ÷ 2」：一个贴图周期对应 2 个世界单位，格子尺寸和
+    // 立方体一个面一致；超出 [0,1] 的部分靠 Texture 内部的 wrap 平铺出去。
+    constexpr float kFloorHalf = 50.0f;
     const Vec3 floor_positions[4] = {
-        Vec3(-3.0f, -1.0f, -3.0f), Vec3( 3.0f, -1.0f, -3.0f),
-        Vec3( 3.0f, -1.0f,  3.0f), Vec3(-3.0f, -1.0f,  3.0f)
+        Vec3(-kFloorHalf, -1.0f, -kFloorHalf), Vec3( kFloorHalf, -1.0f, -kFloorHalf),
+        Vec3( kFloorHalf, -1.0f,  kFloorHalf), Vec3(-kFloorHalf, -1.0f,  kFloorHalf)
+    };
+    const Vec3 floor_normals[4] = {
+        Vec3(0.0f, 1.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f),
+        Vec3(0.0f, 1.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f)
     };
     const Vec2 floor_uvs[4] = {
-        Vec2(-1.5f, -1.5f), Vec2( 1.5f, -1.5f),
-        Vec2( 1.5f,  1.5f), Vec2(-1.5f,  1.5f)
+        Vec2(-kFloorHalf * 0.5f, -kFloorHalf * 0.5f), Vec2( kFloorHalf * 0.5f, -kFloorHalf * 0.5f),
+        Vec2( kFloorHalf * 0.5f,  kFloorHalf * 0.5f), Vec2(-kFloorHalf * 0.5f,  kFloorHalf * 0.5f)
     };
-    const Vec3 floor_normal(0.0f, 1.0f, 0.0f);
-    const int  floor_triangles[2][3] = { { 0, 1, 2 }, { 0, 2, 3 } };
-    float      floor_lights[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    const int floor_triangles[2][3] = { { 0, 1, 2 }, { 0, 2, 3 } };
 
-    // ---- 5. 投影 + 相机状态 ----
+    // ---- 5. 组装场景：地板 + 中央立方体 + 两圈小立方体 ----
     constexpr float kPi = 3.14159265358979f;
 
+    Scene scene;
+    std::vector<RenderItem> items;
+
+    // 往场景里加一个物体：同时登记进 Scene（管剔除）和 items（管渲染）
+    auto add_object = [&](const Vec3* positions, const Vec3* normals, const Vec2* uvs,
+                          int vertex_count,
+                          const int (*triangles)[3], int triangle_count,
+                          const Mat44& model)
+    {
+        SceneObject obj;
+        obj.positions      = positions;
+        obj.position_count = vertex_count;
+        obj.triangles      = triangles;
+        obj.triangle_count = triangle_count;
+        obj.model          = model;
+        obj.bounds         = Aabb::from_positions(positions, vertex_count);   // 模型空间包围盒
+
+        RenderItem item;
+        item.scene_index    = scene.add_object(obj);
+        item.positions      = positions;
+        item.normals        = normals;
+        item.uvs            = uvs;
+        item.vertex_count   = vertex_count;
+        item.triangles      = triangles;
+        item.triangle_count = triangle_count;
+        item.model          = model;
+        items.push_back(item);
+    };
+
+    // ① 地板（模型矩阵 = 单位阵，顶点已经在世界空间）
+    add_object(floor_positions, floor_normals, floor_uvs, 4,
+               floor_triangles, 2, Mat44::identity());
+
+    // ② 中央立方体
+    add_object(cube_positions, cube_normals, cube_uvs, kCubeVertexCount,
+               cube_triangles, 12, Mat44::identity());
+
+    // ③ 两圈小立方体：半径 14 和 26，各 12 个，绕 Y 轴均布。
+    //    半径特意选得比相机距离（r = 5）大不少，这样视野一次只能装下一小段圆弧，
+    //    「可见 N / M」这个数字才会明显小于 M —— 否则剔除就看不出效果。
+    constexpr int   kRingCount    = 12;
+    constexpr float kRingRadius[] = { 14.0f, 26.0f };
+
+    for (float radius : kRingRadius) {
+        for (int i = 0; i < kRingCount; ++i) {
+            const float angle = (2.0f * kPi / static_cast<float>(kRingCount)) * static_cast<float>(i);
+            const Mat44 model = Mat44::translate(radius * std::sin(angle), 0.0f,
+                                                 radius * std::cos(angle));
+            add_object(cube_positions, cube_normals, cube_uvs, kCubeVertexCount,
+                       cube_triangles, 12, model);
+        }
+    }
+
+    std::printf("[场景] 共 %d 个物体（1 地板 + 1 中央立方体 + %d 小立方体）\n",
+                scene.object_count(), kRingCount * 2);
+
+    // ---- 6. 投影 + 相机状态 ----
     const Mat44 projection = Mat44::perspective(kPi / 3.0f,
                                                 static_cast<float>(kWidth) /
                                                     static_cast<float>(kHeight),
                                                 0.1f, 100.0f);
 
-    float yaw   = 0.0f;     // 绕 Y 轴：0 朝 +Z
+    float yaw   = 0.0f;     // 绕 Y 轴：0 时相机在 +Z，朝 -Z 看
     float pitch = 0.0f;     // 绕 X 轴
 
     // 对照实验开关：T 切透视校正，B 切采样方式
     bool perspective_correct = true;
     bool bilinear            = false;
 
-    // 每帧算好的顶点亮度缓存（0~1）
-    float intensities[36];
+    // 上一次打印过的「可见数」，只在变化时打日志，免得刷屏
+    int last_visible = -1;
 
-    // position 和 normal 在 Vertex 数组里是交替排列的，而 renderer 要的是
-    // 一串连续的 Vec3 / Vec2，所以各拷一份出来（初始化一次就够）。
-    Vec3 positions[36];
-    Vec2 uvs[36];
-    for (int i = 0; i < 36; ++i) {
-        positions[i] = vertices[i].position;
-        uvs[i]       = vertices[i].uv;
-    }
-
-    // ---- 6. 主循环 ----
+    // ---- 7. 主循环 ----
     while (!window.closed()) {
         window.poll_events();
 
@@ -167,14 +267,11 @@ int main(int argc, char* argv[])
         yaw   += window.mouse_dx() * 0.005f;
         pitch -= window.mouse_dy() * 0.005f;
 
-        // pitch 夹紧：上界 π/3 是防止相机翻到地板下面；
-        // 下界 -π/24（-7.5°）是因为现在有地板了 —— 相机高度
+        // pitch 夹紧：上界 π/3 防止相机摆得太平；下界 -π/24（-7.5°）保证
         // eye_y = r * sin(pitch) = 5 * sin(-7.5°) ≈ -0.65，还在地板（y = -1）之上。
-        // 而且这个「贴地」角度正好是透视扭曲最狠的视角，想看清对照实验就往下拖到底。
         pitch = std::clamp(pitch, -kPi / 24.0f, kPi / 3.0f);
 
-        // 球面坐标 → 相机位置，距离原点固定 5。
-        // ⚠ r 必须大于「地板离原点最远的角」到原点的距离（≈4.36），见上面第 4 节的说明。
+        // 球面坐标 → 相机位置，距离原点固定 5
         const float r = 5.0f;
         const float eye_x = r * std::cos(pitch) * std::sin(yaw);
         const float eye_y = r * std::sin(pitch);
@@ -184,7 +281,8 @@ int main(int argc, char* argv[])
                                          Vec3(0.0f, 0.0f, 0.0f),
                                          Vec3(0.0f, 1.0f, 0.0f));
 
-        const Mat44 model = Mat44::identity();
+        // 视锥只跟相机有关，所以剔除用的是 P * V（**不含** M）
+        const Mat44 view_projection = projection * view;
 
         // ---- 按键盘切开关（对照实验） ----
         if (window.key_pressed(SDLK_t)) {
@@ -196,48 +294,50 @@ int main(int argc, char* argv[])
             std::printf("[B] 采样方式 = %s\n", bilinear ? "双线性" : "最近邻");
         }
 
-        // ---- Lambert 光照：对每个顶点算亮度（和第 9 步完全一样） ----
-        // 肩上光：光源位置 = 相机 + 右方*4 + 上方*2，跟着相机一起动。
-        // 原因见第 9 步：固定世界空间光源在相机绕到背光侧时会让整模型均匀灰。
+        // ---- ① 视锥剔除：整帧只判一次，给每个物体打上 visible ----
+        const int visible = scene.cull(view_projection);
+        if (visible != last_visible) {
+            std::printf("[剔除] 可见 %d / %d\n", visible, scene.object_count());
+            last_visible = visible;
+        }
+
+        // ---- 肩上光：光源位置 = 相机 + 右方*4 + 上方*2，跟着相机一起动 ----
+        // （和第 9、10 步一样：固定世界空间光源会在绕到背光侧时让整模型一片灰）
         const Vec3 eye(eye_x, eye_y, eye_z);
-        const Vec3 forward  = normalize(-eye);   // 相机看向原点
-        const Vec3 right    = normalize(cross(forward, Vec3(0, 1, 0)));
-        const Vec3 cam_up   = cross(right, forward);
+        const Vec3 forward = normalize(-eye);                       // 相机看向原点
+        const Vec3 right   = normalize(cross(forward, Vec3(0, 1, 0)));
+        const Vec3 cam_up  = cross(right, forward);
         const Vec3 light_pos = eye + right * 4.0f + cam_up * 2.0f;
 
-        // 法线变换：M 是纯旋转（没有非均匀缩放），所以 M 的逆转置 = M。
-        for (int i = 0; i < 36; ++i) {
-            const Vec3 world_pos    = (model * vertices[i].position).xyz();
-            const Vec3 world_normal = model.transformDirection(vertices[i].normal);
-            const Vec3 light_dir    = normalize(light_pos - world_pos);
-            intensities[i] = lambert_intensity(world_normal, light_dir, 0.2f);
+        // ---- ② 逐个物体：不可见的直接跳过，可见的算光照 + 送进 renderer ----
+        for (const RenderItem& item : items) {
+            if (!scene.object(item.scene_index).visible) {
+                continue;   // 视锥剔除生效：这一整个物体的所有三角形都不用算
+            }
+
+            // 顶点亮度（Lambert）：法线要跟着 model 一起变。
+            // model 是纯平移，transformDirection 对方向无影响，但仍然走这条路
+            // —— 以后 model 带旋转、缩放时不用再改这里。
+            float light[kCubeVertexCount];
+            for (int i = 0; i < item.vertex_count; ++i) {
+                const Vec3 world_pos    = (item.model * item.positions[i]).xyz();
+                const Vec3 world_normal = item.model.transformDirection(item.normals[i]);
+                const Vec3 light_dir    = normalize(light_pos - world_pos);
+                light[i] = lambert_intensity(world_normal, light_dir, 0.2f);
+            }
+
+            // MVP = P * V * M，比别的物体多一个 M
+            const Mat44 mvp = view_projection * item.model;
+
+            renderer::draw_filled_textured(buffer, mvp,
+                                           item.positions, item.uvs, light,
+                                           item.vertex_count,
+                                           item.triangles, item.triangle_count,
+                                           texture,
+                                           perspective_correct, bilinear);
         }
 
-        // 地板的亮度：地板本来就在世界空间，位置直接用，法线恒为 (0,1,0)
-        for (int i = 0; i < 4; ++i) {
-            const Vec3 light_dir = normalize(light_pos - floor_positions[i]);
-            floor_lights[i] = lambert_intensity(floor_normal, light_dir, 0.2f);
-        }
-
-        const Mat44 mvp = projection * view * model;
-
-        // ---- 渲染：贴图 × 光照亮度 ----
-        // 先画地板再画立方体。其实先后无所谓——深度测试会兜底，
-        // 谁在前面谁就留在画面上（第 8 步的成果）。
-        renderer::draw_filled_textured(buffer, mvp,
-                                       floor_positions, floor_uvs, floor_lights,
-                                       4, floor_triangles, 2,
-                                       texture,
-                                       perspective_correct, bilinear);
-
-        renderer::draw_filled_textured(buffer, mvp,
-                                       positions, uvs, intensities,
-                                       36, triangles, 12,
-                                       texture,
-                                       perspective_correct, bilinear);
-
-        window.present(static_cast<const std::uint32_t*>(
-            buffer.surface()->pixels));
+        window.present(static_cast<const std::uint32_t*>(buffer.surface()->pixels));
     }
 
     return 0;

@@ -84,9 +84,54 @@ namespace {
 // 边函数：点 P 在边 (V0→V1) 的哪一侧。
 // 返回值 = 2 × 子三角形 V0-V1-P 的有向面积。
 // 正/负代表两侧，0 代表在边上。
-int edge_cross(int x0, int y0, int x1, int y1, int px, int py)
+//
+// 为什么用 long long 而不是 int：
+//   近平面裁剪会造出「贴在近平面边上」的顶点，它们除以很小的 w 之后，
+//   屏幕坐标能到 ±2e5 量级。两个这样的差相乘就超过 int32 的 2.1e9，
+//   符号会被溢出翻掉，于是三角形被随机误判成背面 / 覆盖判断整个错乱
+//   （表现为地板缺一块、动一下又变）。long long 足够放下这个量级。
+long long edge_cross(int x0, int y0, int x1, int y1, int px, int py)
 {
-    return (px - x0) * (y1 - y0) - (py - y0) * (x1 - x0);
+    const long long dx0 = static_cast<long long>(px) - x0;
+    const long long dy0 = static_cast<long long>(py) - y0;
+    const long long dx1 = static_cast<long long>(x1) - x0;
+    const long long dy1 = static_cast<long long>(y1) - y0;
+    return dx0 * dy1 - dy0 * dx1;
+}
+
+// 背面剔除：屏幕空间有向面积判断这个三角形是不是背对着相机。
+//
+//   area2 = (x1-x0)*(y2-y0) - (x2-x0)*(y1-y0)
+//
+// 这算出来是「有向面积的两倍」，符号代表绕序。
+//
+// 判据（本项目采用的、也是屏幕空间里最省事的说法）：
+//   屏幕坐标 x 向右、y 向下，**正面朝你的三角形，area2 > 0**。
+// 等价说法：在物体外表面所在平面上、改用「x 向右 y 向上」的常规坐标系看，
+// 正面三角形的顶点顺序是**顺时针（CW）**。
+// （OpenGL 默认约定的正面是 CCW —— 那是「窗口 y 向上」的坐标系；本项目屏幕
+//   y 向下，两者是同一个绕序在两种坐标轴朝向下换了符号，判定不受影响。
+//   第 11 步实测过：把正面顶点代进去，area2 正好是正的。）
+//
+// 为什么背面就会变号：
+//   面正对你  → 投影不改变绕序 → area2 > 0 → 正面，保留
+//   面背对你  → 相当于从背面看，绕序翻转 → area2 < 0 → 背面，丢掉
+//   退化（三点重合/共线）→ area2 == 0 → 画不出东西，一并丢掉
+//
+// 为什么值得做：立方体 12 个三角形里永远有 6 个是背对你的，
+// 在填像素之前整块丢掉，等于白省一半的填充 —— 而且只有几行加法，
+// 不需要任何额外状态。
+//
+// ⚠ 这一刀改掉了前几版的「不假设绕序」：从第 11 步起，
+// 三角形填充**要求绕序正确**（正面 area2 > 0），否则模型会整体消失。
+bool back_facing(int x0, int y0, int x1, int y1, int x2, int y2)
+{
+    // 同样用 long long：裁剪后的顶点屏幕坐标可能很大（见 edge_cross 的说明），
+    // 用 int 算面积会在极端顶点上溢出、把正面判成背面。
+    const long long area2 =
+        (static_cast<long long>(x1) - x0) * (static_cast<long long>(y2) - y0) -
+        (static_cast<long long>(x2) - x0) * (static_cast<long long>(y1) - y0);
+    return area2 <= 0;
 }
 
 // 浮点 RGB，用于平滑着色的插值
@@ -154,6 +199,9 @@ void draw_triangle_edge(PixelBuffer& fb,
                         int x2, int y2,
                         uint32_t color)
 {
+    // 背面剔除（第 11 步）：背对相机的三角形整块跳过，一个像素都不填
+    if (back_facing(x0, y0, x1, y1, x2, y2)) return;
+
     // ---- 包围盒（顺带裁剪到画布内）----
     const int min_x = std::max(0, std::min({x0, x1, x2}));
     const int min_y = std::max(0, std::min({y0, y1, y2}));
@@ -164,11 +212,13 @@ void draw_triangle_edge(PixelBuffer& fb,
         for (int x = min_x; x <= max_x; ++x) {
 
             // 三条边各算一次边函数（= 2 × 对应子三角形的有向面积）
-            const int w0 = edge_cross(x0, y0, x1, y1, x, y);  // 边 V0→V1
-            const int w1 = edge_cross(x1, y1, x2, y2, x, y);  // 边 V1→V2
-            const int w2 = edge_cross(x2, y2, x0, y0, x, y);  // 边 V2→V0
+            const long long w0 = edge_cross(x0, y0, x1, y1, x, y);  // 边 V0→V1
+            const long long w1 = edge_cross(x1, y1, x2, y2, x, y);  // 边 V1→V2
+            const long long w2 = edge_cross(x2, y2, x0, y0, x, y);  // 边 V2→V0
 
-            // 三个同号 → 在三角形内（不假设绕序，正负都接受）
+            // 三个边函数同号 → 在三角形内。
+            // （背面已经在函数开头整块剔除；这一层判断本身跟绕序无关，
+            //  正负两种都接受，留着更省心）
             if ((w0 >= 0 && w1 >= 0 && w2 >= 0) ||
                 (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
                 fb.put_pixel(x, y, color);
@@ -184,6 +234,9 @@ void draw_triangle_edge(PixelBuffer& fb,
                         int x2, int y2,
                         uint32_t c0, uint32_t c1, uint32_t c2)
 {
+    // 背面剔除（第 11 步）
+    if (back_facing(x0, y0, x1, y1, x2, y2)) return;
+
     const int min_x = std::max(0, std::min({x0, x1, x2}));
     const int min_y = std::max(0, std::min({y0, y1, y2}));
     const int max_x = std::min(fb.width()  - 1, std::max({x0, x1, x2}));
@@ -197,16 +250,16 @@ void draw_triangle_edge(PixelBuffer& fb,
     for (int y = min_y; y <= max_y; ++y) {
         for (int x = min_x; x <= max_x; ++x) {
 
-            const int w0 = edge_cross(x0, y0, x1, y1, x, y);
-            const int w1 = edge_cross(x1, y1, x2, y2, x, y);
-            const int w2 = edge_cross(x2, y2, x0, y0, x, y);
+            const long long w0 = edge_cross(x0, y0, x1, y1, x, y);
+            const long long w1 = edge_cross(x1, y1, x2, y2, x, y);
+            const long long w2 = edge_cross(x2, y2, x0, y0, x, y);
 
             if ((w0 >= 0 && w1 >= 0 && w2 >= 0) ||
                 (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
 
                 // w0+w1+w2 = 2 × 三角形面积，是个恒定值。
                 // 除以它，w 就变成了重心坐标（三个权重，和为 1）。
-                const int sum = w0 + w1 + w2;
+                const long long sum = w0 + w1 + w2;
                 if (sum == 0) continue;     // 退化三角形，跳过
 
                 const float inv = 1.0f / static_cast<float>(sum);
@@ -243,6 +296,9 @@ void draw_triangle_depth(PixelBuffer& fb,
                          int x2, int y2, float z2,
                          uint32_t color)
 {
+    // 背面剔除（第 11 步）
+    if (back_facing(x0, y0, x1, y1, x2, y2)) return;
+
     const int min_x = std::max(0, std::min({x0, x1, x2}));
     const int min_y = std::max(0, std::min({y0, y1, y2}));
     const int max_x = std::min(fb.width()  - 1, std::max({x0, x1, x2}));
@@ -251,15 +307,15 @@ void draw_triangle_depth(PixelBuffer& fb,
     for (int y = min_y; y <= max_y; ++y) {
         for (int x = min_x; x <= max_x; ++x) {
 
-            const int w0 = edge_cross(x0, y0, x1, y1, x, y);
-            const int w1 = edge_cross(x1, y1, x2, y2, x, y);
-            const int w2 = edge_cross(x2, y2, x0, y0, x, y);
+            const long long w0 = edge_cross(x0, y0, x1, y1, x, y);
+            const long long w1 = edge_cross(x1, y1, x2, y2, x, y);
+            const long long w2 = edge_cross(x2, y2, x0, y0, x, y);
 
             if ((w0 >= 0 && w1 >= 0 && w2 >= 0) ||
                 (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
 
                 // 重心坐标插值算深度
-                const int sum = w0 + w1 + w2;
+                const long long sum = w0 + w1 + w2;
                 if (sum == 0) continue;
 
                 const float inv = 1.0f / static_cast<float>(sum);
@@ -281,6 +337,9 @@ void draw_triangle_depth(PixelBuffer& fb,
                          int x1, int y1, float z1, uint32_t c1,
                          int x2, int y2, float z2, uint32_t c2)
 {
+    // 背面剔除（第 11 步）
+    if (back_facing(x0, y0, x1, y1, x2, y2)) return;
+
     const int min_x = std::max(0, std::min({x0, x1, x2}));
     const int min_y = std::max(0, std::min({y0, y1, y2}));
     const int max_x = std::min(fb.width()  - 1, std::max({x0, x1, x2}));
@@ -293,14 +352,14 @@ void draw_triangle_depth(PixelBuffer& fb,
     for (int y = min_y; y <= max_y; ++y) {
         for (int x = min_x; x <= max_x; ++x) {
 
-            const int w0 = edge_cross(x0, y0, x1, y1, x, y);
-            const int w1 = edge_cross(x1, y1, x2, y2, x, y);
-            const int w2 = edge_cross(x2, y2, x0, y0, x, y);
+            const long long w0 = edge_cross(x0, y0, x1, y1, x, y);
+            const long long w1 = edge_cross(x1, y1, x2, y2, x, y);
+            const long long w2 = edge_cross(x2, y2, x0, y0, x, y);
 
             if ((w0 >= 0 && w1 >= 0 && w2 >= 0) ||
                 (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
 
-                const int sum = w0 + w1 + w2;
+                const long long sum = w0 + w1 + w2;
                 if (sum == 0) continue;
 
                 const float inv = 1.0f / static_cast<float>(sum);
@@ -376,6 +435,11 @@ void draw_triangle_textured(PixelBuffer& fb,
                             bool perspective_correct,
                             bool bilinear)
 {
+    // 背面剔除（第 11 步）：先整块判一次，省掉整个包围盒的填像素开销。
+    // 这一版走的是「裁剪后」的三角形，clipper 的扇形三角化不改变绕序，
+    // 所以裁剪出来的碎块照样能正确判正反。
+    if (back_facing(v0.x, v0.y, v1.x, v1.y, v2.x, v2.y)) return;
+
     // ---- 包围盒（顺带裁剪到画布内）----
     const int min_x = std::max(0, std::min({v0.x, v1.x, v2.x}));
     const int min_y = std::max(0, std::min({v0.y, v1.y, v2.y}));
@@ -385,16 +449,16 @@ void draw_triangle_textured(PixelBuffer& fb,
     for (int y = min_y; y <= max_y; ++y) {
         for (int x = min_x; x <= max_x; ++x) {
 
-            const int w0 = edge_cross(v0.x, v0.y, v1.x, v1.y, x, y);  // 边 V0→V1
-            const int w1 = edge_cross(v1.x, v1.y, v2.x, v2.y, x, y);  // 边 V1→V2
-            const int w2 = edge_cross(v2.x, v2.y, v0.x, v0.y, x, y);  // 边 V2→V0
+            const long long w0 = edge_cross(v0.x, v0.y, v1.x, v1.y, x, y);  // 边 V0→V1
+            const long long w1 = edge_cross(v1.x, v1.y, v2.x, v2.y, x, y);  // 边 V1→V2
+            const long long w2 = edge_cross(v2.x, v2.y, v0.x, v0.y, x, y);  // 边 V2→V0
 
             if (!((w0 >= 0 && w1 >= 0 && w2 >= 0) ||
                   (w0 <= 0 && w1 <= 0 && w2 <= 0))) {
                 continue;
             }
 
-            const int sum = w0 + w1 + w2;
+            const long long sum = w0 + w1 + w2;
             if (sum == 0) continue;     // 退化三角形，跳过
 
             const float inv = 1.0f / static_cast<float>(sum);
