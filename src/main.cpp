@@ -103,9 +103,9 @@ int main(int argc, char* argv[])
     }
 
     // ---- 2. 贴图：优先读一张真实图片，读不到就退回代码生成的棋盘格 ----
-    Texture texture = Texture::make_checkerboard(64, 8, Color(235, 235, 235), Color(50, 58, 78));
-    if (io::load_texture_bmp("assets/texture_brick.bmp", texture)) {
-        std::printf("[贴图] 已加载 assets/texture_brick.bmp（%d×%d）\n",
+    Texture texture = Texture::make_checkerboard(64, 8, Color(240, 226, 200), Color(150, 108, 70));
+    if (io::load_texture_bmp("assets/texture_wood.bmp", texture)) {
+        std::printf("[贴图] 已加载 assets/texture_wood.bmp（%d×%d）\n",
                     texture.width(), texture.height());
     } else {
         std::printf("[贴图] 加载失败，退回代码生成的棋盘格\n");
@@ -250,6 +250,16 @@ int main(int argc, char* argv[])
     float yaw   = 0.0f;     // 绕 Y 轴：0 时相机在 +Z，朝 -Z 看
     float pitch = 0.0f;     // 绕 X 轴
 
+    // 环境光下限（0~1）：背光面保底亮度。0.2 时背光面几乎全黑，整个画面偏暗；
+    // 提到 0.35 让阴影浅一些，又不至于把明暗关系压没。
+    constexpr float kAmbient = 0.35f;
+
+    // 背景天空渐变：上（天顶）到下（地平线）。纯黑背景会让画面发闷。
+    constexpr int kSkyBands      = 75;                        // 75 条 × 8 像素 = 600
+    constexpr int kSkyBandHeight = kHeight / kSkyBands;
+    const Color   kSkyTop(44, 58, 84);
+    const Color   kSkyHorizon(132, 150, 172);
+
     // 对照实验开关：T 切透视校正，B 切采样方式
     bool perspective_correct = true;
     bool bilinear            = false;
@@ -261,7 +271,20 @@ int main(int argc, char* argv[])
     while (!window.closed()) {
         window.poll_events();
 
-        buffer.clear(Color(0, 0, 0));
+        // 背景：只清深度（颜色交给下面的渐变天空铺），
+        // 逐条画横带拼出一个从深蓝到灰蓝的渐变。
+        buffer.clear_depth();
+        for (int i = 0; i < kSkyBands; ++i) {
+            const float t = static_cast<float>(i) / static_cast<float>(kSkyBands - 1);
+            auto mix = [t](uint8_t a, uint8_t b) -> uint8_t {
+                return static_cast<uint8_t>(static_cast<float>(a) +
+                                            (static_cast<float>(b) - a) * t);
+            };
+            buffer.draw_filled_rect(0, i * kSkyBandHeight, kWidth, kSkyBandHeight,
+                                    Color(mix(kSkyTop.r, kSkyHorizon.r),
+                                          mix(kSkyTop.g, kSkyHorizon.g),
+                                          mix(kSkyTop.b, kSkyHorizon.b)));
+        }
 
         // ---- 相机：鼠标拖动更新 yaw/pitch ----
         yaw   += window.mouse_dx() * 0.005f;
@@ -323,7 +346,7 @@ int main(int argc, char* argv[])
                 const Vec3 world_pos    = (item.model * item.positions[i]).xyz();
                 const Vec3 world_normal = item.model.transformDirection(item.normals[i]);
                 const Vec3 light_dir    = normalize(light_pos - world_pos);
-                light[i] = lambert_intensity(world_normal, light_dir, 0.2f);
+                light[i] = lambert_intensity(world_normal, light_dir, kAmbient);
             }
 
             // MVP = P * V * M，比别的物体多一个 M
